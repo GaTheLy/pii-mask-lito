@@ -150,11 +150,7 @@ def test_docx_inline_image_survives_a_masked_paragraph():
 
 
 def test_docx_masks_every_story_part():
-    """Text box, first-page header, even-page header, footnote, endnote.
-
-    Each of these was verified leaking against the container walk that only
-    knew about the body, the tables and `section.header`.
-    """
+    """Text box, first-page header, even-page header, footnote, and endnote."""
     import zipfile
 
     import docx
@@ -422,9 +418,8 @@ def test_xlsx_charts_and_images_survive_the_round_trip():
 def test_document_properties_are_masked_in_both_formats():
     """dc:creator and dc:title ship with the file and no reader has to open it.
 
-    Both were verified readable in docProps/core.xml after every paragraph and
-    every cell had been masked -- export tools can write a person into the
-    author field and another person into the title.
+    Both can remain readable in docProps/core.xml after every paragraph and cell
+    has been masked because export tools can populate the author and title.
     """
     import docx
     import openpyxl

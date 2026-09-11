@@ -80,7 +80,7 @@ def mask_csv(src: str, dest: str, detector, registry) -> list:
 
 # Every part of a .docx that can hold a paragraph a reader will see. Walking
 # `document.paragraphs`, `document.tables` and `section.header/.footer` -- the
-# obvious four -- misses all of these, each verified leaking on a built sample:
+# obvious four -- misses important OOXML story parts:
 # a first-page or even-page header lives in its own part that `section.header`
 # never returns, and footnotes, endnotes and comments are separate parts
 # entirely. Matched on the content-type suffix so the check does not depend on
@@ -107,11 +107,9 @@ def _pieces(paragraph) -> list[tuple]:
     """Text-carrying leaves of one paragraph, in reading order.
 
     Walks `w:hyperlink` as well as `w:r`, exactly as python-docx's own
-    `paragraph.text` does. That is not a detail: the old code rewrote the whole
-    masked paragraph into `runs[0]`, and `runs` excludes runs nested in a
-    hyperlink, so a paragraph reading "Contact Dorian Vale today" could come
-    out as "Contact <NAME#0> todayDorian Vale" -- the mask applied and the original still
-    printed beside it.
+    `paragraph.text` does. Rewriting the whole paragraph into `runs[0]` would
+    exclude hyperlink-nested runs, duplicate their visible text, and damage the
+    surrounding layout.
 
     Text inside `w:txbxContent` is deliberately not collected: those paragraphs
     are visited in their own right by the `w:p` sweep in `mask_docx`, and a run
@@ -256,8 +254,7 @@ def mask_docx(src: str, dest: str, detector, registry) -> list:
     for part in _story_parts(document):
         root, owned = _story_root(part)
         # Every `w:p` in the part, at any depth. That one sweep covers body
-        # paragraphs, table cells nested to any depth, and -- the case the
-        # old container walk could not reach at all -- paragraphs inside a
+        # paragraphs, table cells nested to any depth, and paragraphs inside a
         # text box, whose content lives under a run rather than under the body.
         for paragraph in root.iter(qn("w:p")):
             applied += _mask_paragraph(paragraph, detector, registry)

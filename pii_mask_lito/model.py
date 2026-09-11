@@ -122,11 +122,9 @@ class TokenText:
         return rects
 
 
-# Money is sacred, and so are the codes that sit beside it in a charge table.
-# This was previously a rail on the agent path only, which made the guarantee
-# depend on which detector happened to win merge_spans -- a multi-token address
-# span running along a charge row could still swallow the amount printed in it.
-# Enforced at render time instead, it holds for every detector unconditionally.
+# Enforce this at render time so every detector preserves monetary values and
+# the adjacent codes in charge tables, including when a multi-token span crosses
+# the row.
 # Only shapes carrying a decimal point or a thousands separator. Bare 4- and
 # 5-digit runs are indistinguishable from a house number, so treating them as
 # money would quietly punch a hole in masked street addresses. Short codes are

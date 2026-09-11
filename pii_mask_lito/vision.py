@@ -131,8 +131,8 @@ def faces(image: Image.Image) -> list[tuple[float, float, float, float]]:
         )
     # float(), not the numpy scalars OpenCV hands back. YuNet returns float32
     # and Haar returns int32; either one reaches Finding.bbox and then the
-    # masking report, where json.dumps refuses it -- so a run that masked and
-    # verified correctly still died writing its own audit trail.
+    # masking report, where json.dumps refuses it and prevents the audit trail
+    # from being written.
     return [
         (float(x) / width, float(y) / height,
          float(x + w) / width, float(y + h) / height)

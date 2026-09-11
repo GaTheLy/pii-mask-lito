@@ -1,7 +1,7 @@
 """Character-area scoring against known ground truth.
 
-Scored by *area covered*, not by span. Span-level scoring hides both of this
-project's actual failure modes: a mask that covers four of a name's seven
+Scored by *area covered*, not by span. Span-level scoring hides important
+partial-coverage cases: a mask that covers four of a name's seven
 letters scores as a hit, and a mask three times wider than the value it replaces
 scores as a hit too. Area makes each visible as a number.
 

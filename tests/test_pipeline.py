@@ -451,13 +451,7 @@ def test_report_trace_is_withheld_by_default():
 
 
 def test_a_small_image_panel_is_still_read():
-    """H1. The old rule OCR'd a page only when raster images covered 10% of it.
-
-    A small insurance-card or ID panel on a text-rich page tripped nothing, and
-    every identifier printed inside it went unread while the run reported
-    success -- the same root cause as the worst bug in this project's history,
-    a heuristic deciding whether to look.
-    """
+    """Every raster panel is eligible for OCR, regardless of page coverage."""
     from PIL import Image, ImageDraw
     from reportlab.lib.utils import ImageReader
     from reportlab.pdfgen import canvas
@@ -470,9 +464,8 @@ def test_a_small_image_panel_is_still_read():
         return
     from pii_mask_lito.images import _font
 
-    # Sized so the panel's pixels land roughly 1:1 at the default 300 DPI, which
-    # makes its text about 10pt on the page -- an insurance-card thumbnail, not
-    # a decorative logo.
+    # Sized so the panel's pixels land roughly 1:1 at the default 300 DPI and
+    # its text remains small but readable.
     panel = Image.new("RGB", (700, 130), "white")
     ImageDraw.Draw(panel).text((12, 30), "SSN 000-00-0000", fill="black", font=_font(64))
     src, dest = "/tmp/piimask_panel.pdf", "/tmp/piimask_panel_masked.pdf"
@@ -480,7 +473,7 @@ def test_a_small_image_panel_is_still_read():
     page.setFont("Helvetica", 10)
     for row in range(60):  # text-rich, so the panel is a small fraction of it
         page.drawString(50, 740 - 11 * row, "Statement of account activity for the period. " * 2)
-    # 168 x 31pt is under 1% of the page: nowhere near the old 10% threshold.
+    # 168 x 31pt is under 1% of the page.
     page.drawImage(ImageReader(panel), 60, 60, width=168, height=31)
     page.showPage()
     page.save()
@@ -501,6 +494,32 @@ def test_corpus_scores_above_its_floor():
         return
     results = score_corpus()
     assert mean_map_recall(results) >= 0.90, results
+
+
+def test_long_pdf_uses_disk_backed_page_storage(tmp_path, monkeypatch):
+    """Long inputs must not retain every source and masked RGB page in RAM."""
+    from reportlab.pdfgen import canvas
+
+    from pii_mask_lito import pdf as pdf_module
+    from pii_mask_lito.pipeline import _SPOOL_PAGE_THRESHOLD, mask as mask_file
+
+    src, dest = tmp_path / "long.pdf", tmp_path / "masked.pdf"
+    document = canvas.Canvas(str(src), pagesize=(180, 240))
+    for page in range(_SPOOL_PAGE_THRESHOLD):
+        document.drawString(12, 210, f"Synthetic page {page + 1}")
+        document.showPage()
+    document.save()
+
+    called = []
+    original = pdf_module.spool_page_images
+
+    def observed(*args, **kwargs):
+        called.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pdf_module, "spool_page_images", observed)
+    mask_file(str(src), str(dest), detector=Detector(entities=[]), verify=False)
+    assert called and pdf_module.page_count(str(dest)) == _SPOOL_PAGE_THRESHOLD
 
 
 def test_read_pages_keeps_the_real_page_number_on_a_subset():

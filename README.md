@@ -100,6 +100,12 @@ masks. Native-text PDFs use their text geometry; scans and images use OCR. PDF
 pages that required OCR are rechecked after masking so that visible text is
 tested again from the rendered result.
 
+Long PDFs spool reusable page renders into a private temporary directory and
+process OCR in small batches. This bounds the memory used by page pixels; the
+OCR model still has a substantial fixed memory cost. Temporary renders contain
+source pixels, are removed when the command finishes, and should be created on
+an encrypted or otherwise access-controlled local volume for sensitive work.
+
 Text reports are safe by default: paths and detected values are redacted.
 `--report-values` deliberately includes original values for an audit workflow;
 treat such a report as sensitive source data and do not commit or share it.

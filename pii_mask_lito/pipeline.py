@@ -24,6 +24,11 @@ PDF_SUFFIXES = {".pdf"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 OFFICE_SUFFIXES = {".txt": "txt", ".csv": "csv", ".docx": "docx", ".xlsx": "xlsx"}
 _TAG = re.compile(r"<[A-Z_]+#\d+>")
+# Above this size, keeping both rendered and masked 300-DPI pages in memory is
+# needlessly expensive. The disk-backed path keeps behavior identical while
+# bounding resident page buffers for long documents.
+_SPOOL_PAGE_THRESHOLD = 8
+_PAGE_BATCH = 4
 
 
 class MaskingError(RuntimeError):
@@ -152,9 +157,8 @@ def mask(
             # Gate 2 found identifier shapes nothing proposed. Before refusing,
             # give them back to the detector and rebuild once.
             #
-            # This closes a real gap rather than papering over one. `_recheck`
-            # re-reads the masked pages *in memory*; verification re-reads the
-            # file as written, after reportlab has re-encoded every page. OCR
+            # `_recheck` reads the masked page images; verification reads the file
+            # as written, after reportlab has re-encoded every page. OCR
             # does not agree across those two renderings, so a line reading
             # "Date: 09-08-2023" can exist only on the second -- no
             # detector ever saw the token, and no amount of recheck could.
@@ -212,9 +216,8 @@ def _ocr(name: str):
 def _ocr_or_none(name: str, src: str, report: Report):
     """OCR every page when an engine exists; require one only when it must.
 
-    The old rule loaded an engine when a page looked image-heavy, and every page
-    that did not look image-heavy went unread. That heuristic is gone: OCR now
-    runs on every page unconditionally (see pdf.extract).
+    OCR runs on every page when an engine is available (see ``pdf.extract``),
+    including small raster regions embedded in otherwise native PDFs.
 
     The engine itself is picked by what the pages actually need. A scan has no
     text layer, so the accurate engine is the standard -- whatever paddle fails
@@ -284,7 +287,7 @@ def _symbol_spans(tokens: list, first: int) -> list:
 
     `first` is the index the symbol tokens start at. A payload that matches the
     lexicon or a pattern is caught by the ordinary detectors like any other
-    token; this covers the rest, because a claim-form barcode encoding a 6+
+    token; this covers the rest, because a form barcode encoding a 6+
     digit run is an account number whether or not anything recognises the value.
     """
     return [
@@ -344,24 +347,49 @@ def _vision_boxes(image, tokens, entities, report, page: int,
 
 def _mask_pdf(src, dest, detector, registry, report, engine, dpi, vlm,
               recheck=True, loop=None, mask_unread_ink=False) -> None:
-    # Rendered once and used for everything: extraction reads these pixels,
-    # symbol decoding scans them, and the masks are drawn on them.
-    rendered = pdf.page_images(src, dpi)
+    if pdf.page_count(src) < _SPOOL_PAGE_THRESHOLD:
+        rendered = pdf.page_images(src, dpi)
+        return _mask_pdf_images(
+            src, dest, detector, registry, report, engine, dpi, vlm,
+            rendered, {}, recheck, loop, mask_unread_ink,
+        )
+
+    # Long documents are rendered once too, but their reusable page images are
+    # kept as PNGs instead of simultaneous RGB buffers. This trades bounded,
+    # local disk I/O for memory that no longer grows by roughly two full page
+    # images per page.
+    with tempfile.TemporaryDirectory(prefix="pii-mask-pages-") as work:
+        rendered = pdf.spool_page_images(src, Path(work) / "source", dpi)
+        masked_images = pdf.DiskImageStore(Path(work) / "masked")
+        return _mask_pdf_images(
+            src, dest, detector, registry, report, engine, dpi, vlm,
+            rendered, masked_images, recheck, loop, mask_unread_ink,
+        )
+
+
+def _mask_pdf_images(src, dest, detector, registry, report, engine, dpi, vlm,
+                     rendered, masked_images, recheck=True, loop=None,
+                     mask_unread_ink=False) -> None:
     pages_tokens, _sizes, provenance = pdf.extract(
         src, ocr=engine, dpi=dpi, rendered=rendered, with_provenance=True
     )
-    masked_images, text_layers, page_boxes = {}, {}, {}
+    text_layers, page_boxes = {}, {}
     entities = set(detector.entities)
 
     # Barcode payloads join the token stream before detection, so the lexicon
     # learns them and they propagate to damaged printed copies of themselves.
     symbol_spans: dict[int, list] = {}
     if symbols.available():
-        for index, image in enumerate(rendered):
-            found = symbols.decode(image, page=index)
-            if found:
-                symbol_spans[index] = _symbol_spans(found, len(pages_tokens[index]))
-                pages_tokens[index] = pages_tokens[index] + found
+        for index in range(len(rendered)):
+            image = rendered[index]
+            try:
+                found = symbols.decode(image, page=index)
+                if found:
+                    symbol_spans[index] = _symbol_spans(found, len(pages_tokens[index]))
+                    pages_tokens[index] = pages_tokens[index] + found
+            finally:
+                if isinstance(rendered, pdf.DiskImageStore):
+                    image.close()
     else:
         report.review.append(
             "zxing-cpp not installed: barcodes and 2D symbols were not decoded, "
@@ -373,7 +401,15 @@ def _mask_pdf(src, dest, detector, registry, report, engine, dpi, vlm,
     tts = [TokenText(tokens) for tokens in pages_tokens]
     page_spans = []
     for index, tt in enumerate(tts):
-        spans = vlm.detect(rendered[index], tt) if vlm is not None else detector.detect(tt)
+        if vlm is None:
+            spans = detector.detect(tt)
+        else:
+            image = rendered[index]
+            try:
+                spans = vlm.detect(image, tt)
+            finally:
+                if isinstance(rendered, pdf.DiskImageStore):
+                    image.close()
         detector.learn(spans, tt)
         # A barcode encodes cleanly what OCR often reads badly, so its payload
         # goes into the lexicon whether or not a detector proposed it.
@@ -393,26 +429,29 @@ def _mask_pdf(src, dest, detector, registry, report, engine, dpi, vlm,
                 report.findings.append(
                     Finding(span.entity, span.text, tag, span.score, span.source, page_no, bbox)
                 )
-        for entity, bbox in _vision_boxes(
-            rendered[index], pages_tokens[index], entities, report, index,
-            mask_unread_ink,
-        ):
-            # Indexed on position, not value: there is no value to key on, and
-            # two photographs on one page are two different people.
-            tag = registry.tag(entity, f"p{index}:{bbox[0]:.3f},{bbox[1]:.3f}")
-            boxes.append((bbox, tag))
-            layer.append((bbox, tag))
-            report.findings.append(Finding(entity, "", tag, 0.8, "vision", index, bbox))
-        masked_images[index] = images.mask(rendered[index], boxes) if boxes else rendered[index]
+        image = rendered[index]
+        try:
+            for entity, bbox in _vision_boxes(
+                image, pages_tokens[index], entities, report, index,
+                mask_unread_ink,
+            ):
+                # Indexed on position, not value: there is no value to key on, and
+                # two photographs on one page are two different people.
+                tag = registry.tag(entity, f"p{index}:{bbox[0]:.3f},{bbox[1]:.3f}")
+                boxes.append((bbox, tag))
+                layer.append((bbox, tag))
+                report.findings.append(
+                    Finding(entity, "", tag, 0.8, "vision", index, bbox)
+                )
+            masked_images[index] = images.mask(image, boxes) if boxes else image
+        finally:
+            if isinstance(rendered, pdf.DiskImageStore):
+                image.close()
         text_layers[index] = layer
         page_boxes[index] = boxes
 
-    # Tried skipping this on the gate-2 rebuild to halve the runtime. It broke
-    # gate 1: the rebuild starts from the original render, so without the
-    # convergence loop every mask recheck had discovered is simply lost, and an
-    # account number came back readable. Making the retry cheap means keeping
-    # the masked images and applying only the new values, which is a bigger
-    # change than the saving justified.
+    # A gate-2 rebuild starts from the original render, so it must run the
+    # convergence loop again or masks discovered during recheck would be lost.
     if engine is not None and recheck:
         active_pages = {
             index for index, source in enumerate(provenance)
@@ -486,8 +525,7 @@ def _recheck(engine, detector, registry, report, masked_images, text_layers, pag
     # Which pages are worth re-reading. Every masked page, to start with; after
     # that, only the ones the last pass actually drew on.
     #
-    # This is the loop's cost, and it was being paid on every page every pass.
-    # A page that gained nothing last time will read the same this time, because
+    # A page that gained nothing last time reads the same this time, because
     # nothing about it changed -- the image is identical and the engine is
     # deterministic on identical input. Re-reading it is the only work in this
     # function guaranteed to find nothing.
@@ -499,10 +537,28 @@ def _recheck(engine, detector, registry, report, masked_images, text_layers, pag
     # unchanged; only the reads that could not have found anything are gone.
     active = set(masked_images) if active_pages is None else set(active_pages)
 
+    def remask(index: int) -> None:
+        image = masked_images[index]
+        try:
+            masked_images[index] = images.mask(image, page_boxes[index])
+        finally:
+            if isinstance(masked_images, pdf.DiskImageStore):
+                image.close()
+
     for remaining in range(max_passes, 0, -1):
         changed = False
         pages = sorted(active)
-        reads = dict(zip(pages, read_pages(engine, [masked_images[i] for i in pages], pages)))
+        reads = {}
+        for start in range(0, len(pages), _PAGE_BATCH):
+            batch_pages = pages[start : start + _PAGE_BATCH]
+            batch_images = [masked_images[index] for index in batch_pages]
+            try:
+                batch_reads = read_pages(engine, batch_images, batch_pages)
+                reads.update(zip(batch_pages, batch_reads))
+            finally:
+                if isinstance(masked_images, pdf.DiskImageStore):
+                    for image in batch_images:
+                        image.close()
         for index in sorted(masked_images):
             tokens = reads.get(index)
             if tokens is None:
@@ -511,8 +567,7 @@ def _recheck(engine, detector, registry, report, masked_images, text_layers, pag
                     originals[index], detector.propagate(originals[index]), index,
                     registry, report, text_layers, page_boxes, "recheck"))
                 if drawn:
-                    masked_images[index] = images.mask(masked_images[index],
-                                                      page_boxes[index])
+                    remask(index)
                     active.add(index)
                     changed = True
                 continue
@@ -547,7 +602,7 @@ def _recheck(engine, detector, registry, report, masked_images, text_layers, pag
             if not drawn:
                 active.discard(index)
                 continue
-            masked_images[index] = images.mask(masked_images[index], page_boxes[index])
+            remask(index)
             active.add(index)
             changed = True
             if remaining == 1:
@@ -641,11 +696,34 @@ def _readback(path: str, engine) -> str:
 
     from .ocr import read_pages
 
-    pages = pdf.page_images(path) if suffix in PDF_SUFFIXES else [images.load(path)]
-    for tokens in read_pages(engine, pages):
-        assign_lines(tokens)
-        tokens = reading_order(tokens)
-        chunks.append(TokenText(tokens).text)
+    if suffix in PDF_SUFFIXES:
+        def append_batch(page_batch, number_batch) -> None:
+            try:
+                for tokens in read_pages(engine, page_batch, number_batch):
+                    assign_lines(tokens)
+                    chunks.append(TokenText(reading_order(tokens)).text)
+            finally:
+                for rendered in page_batch:
+                    rendered.close()
+
+        page_batch, number_batch = [], []
+        for page_number, image in enumerate(pdf.iter_page_images(path)):
+            page_batch.append(image)
+            number_batch.append(page_number)
+            if len(page_batch) < _PAGE_BATCH:
+                continue
+            append_batch(page_batch, number_batch)
+            page_batch, number_batch = [], []
+        if page_batch:
+            append_batch(page_batch, number_batch)
+    else:
+        image = images.load(path)
+        try:
+            tokens = read_pages(engine, [image])[0]
+            assign_lines(tokens)
+            chunks.append(TokenText(reading_order(tokens)).text)
+        finally:
+            image.close()
     return "\n".join(chunks)
 
 
@@ -715,10 +793,13 @@ def _verify_symbols(path: str) -> list[str]:
     if Path(path).suffix.lower() not in PDF_SUFFIXES or not symbols.available():
         return []
     leaked = []
-    for index, image in enumerate(pdf.page_images(path)):
-        for token in symbols.decode(image, page=index):
-            if symbols.payload_is_identifier(token.text):
-                leaked.append(f"decodable symbol on page {index + 1}")
+    for index, image in enumerate(pdf.iter_page_images(path)):
+        try:
+            for token in symbols.decode(image, page=index):
+                if symbols.payload_is_identifier(token.text):
+                    leaked.append(f"decodable symbol on page {index + 1}")
+        finally:
+            image.close()
     return leaked
 
 
@@ -749,9 +830,8 @@ def _table_noise(span) -> bool:
 def _verify_patterns(text: str) -> tuple[list[str], list[str]]:
     """Gate 2: high-precision identifier shapes in the finished output.
 
-    This is the scan that was previously done by hand over a finished document.
-    Promoting it into the pipeline is the difference between "we checked" and
-    "we checked our own homework".
+    This deliberately derives identifier patterns from the finished document,
+    independently of the values proposed during detection.
 
     What fails and what merely flags is the whole design of this function. It
     fails only on shapes that cannot be anything else: an SSN, a phone number,
