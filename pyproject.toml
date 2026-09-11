@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pii-mask-lito"
+version = "0.1.0"
+description = "Format-preserving PII masking for PDFs, images, and office documents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+
+# Every runtime dependency is Apache-2.0, BSD or MIT. No AGPL: PyMuPDF would
+# force AGPL on this project and on everyone adopting it, which defeats the
+# point of publishing it.
+dependencies = [
+    "presidio-analyzer>=2.2",
+    "spacy>=3.7",
+    "pypdfium2>=4.30",      # Apache-2.0 / BSD-3, bundles BSD PDFium
+    "pypdf>=5.0",           # BSD-3
+    "reportlab>=4.0",       # BSD-3
+    "pillow>=10.0",         # MIT-CMU
+    "python-docx>=1.1",     # MIT
+    "openpyxl>=3.1",        # MIT
+]
+
+[project.optional-dependencies]
+# Test runner. The suite is plain asserts, so pytest is the only thing needed;
+# checks that want an optional extra or the generated corpus skip themselves.
+dev = ["pytest>=8.0"]
+paddle = ["paddleocr>=2.7", "paddlepaddle>=2.6", "numpy"]
+tesseract = ["pytesseract>=0.3.10"]
+rapidocr = ["rapidocr-onnxruntime"]
+accurate = ["spacy-transformers>=1.3"]   # enables en_core_web_trf
+# A barcode survives rasterization intact and carries the account number in a
+# form no detector reads. zxing-cpp is Apache-2.0; pyzbar wraps LGPL zbar and is
+# excluded by the same policy that rules out PyMuPDF.
+barcode = ["zxing-cpp>=2.0"]            # Apache-2.0
+# Face and signature-region detection.
+vision = ["opencv-python>=4.8", "numpy"]  # Apache-2.0
+
+[project.scripts]
+pii-mask-lito = "pii_mask_lito.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pii_mask_lito*"]
+
+# The YuNet face detector's weights, vendored rather than fetched at runtime: a
+# masking tool that silently degrades when it cannot reach the network is a
+# masking tool that silently under-masks. MIT, and the licence text ships beside
+# the file. vision.py falls back to OpenCV's bundled Haar cascade without it.
+[tool.setuptools.package-data]
+pii_mask_lito = ["data/*.onnx", "data/*.LICENSE"]

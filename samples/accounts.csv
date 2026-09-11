@@ -1,0 +1,3 @@
+customer_id,name,email,phone,plan,monthly_fee,credit
+CUS-4827-9136,"Mira Calder",mira.calder@example.net,"+1 202-555-0147",Studio,48.00,-8.00
+CUS-7314-2058,"Dorian Vale",dorian.vale@example.net,"+1 202-555-0183",Team,125.00,-15.00

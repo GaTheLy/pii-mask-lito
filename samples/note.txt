@@ -1,0 +1,9 @@
+Customer support follow-up
+
+Case ID: CASE-2048-7713
+Customer: Mira Calder
+Customer ID: CUS-4827-9136
+Email: mira.calder@example.net
+Phone: +1 202-555-0147
+Mailing address: 1847 Willowglass Lane, Port Haven, OR 97035
+The customer asked to move the delivery window to 2026-10-03.

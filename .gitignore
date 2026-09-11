@@ -1,0 +1,24 @@
+__pycache__/
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Reports may contain sensitive values when explicitly requested; never commit them.
+*report*.json
+samples/audit.json
+# Ignore root-level JSON artifacts; committed JSON belongs in a subdirectory.
+/*.json
+samples/out/
+
+# Generated evaluation artifacts.
+tests/corpus/generated/
+
+# Scratch output.
+tmp/
+masked/
+
+# Local tool state
+.pytest_cache/
+.claude/
+.DS_Store
