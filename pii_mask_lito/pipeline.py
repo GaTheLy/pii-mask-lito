@@ -165,9 +165,7 @@ def mask(
             # Seeding the lexicon makes the finished document the last word.
             if report.leaked_patterns and suffix in PDF_SUFFIXES and not report.leaked:
                 for value in report.leaked_patterns:
-                    detector.lexicon.setdefault(normalize(value), "DATE"
-                                                if any(c in value for c in "/-") else
-                                                "ACCOUNT_NUMBER")
+                    detector.lexicon.setdefault(normalize(value), _pattern_entity(value))
                 report.findings.clear()
                 _mask_pdf(src, tmp.name, detector, registry, report, engine, dpi, vlm,
                           loop=_loop_engine(engine, ocr_engine, loop_ocr, report),
@@ -669,7 +667,7 @@ _NOT_PROPAGATED = {"DATE", "AGE", "LOCATION", "FACE", "SIGNATURE"}
 _TRUSTED_ON_RERENDER = {"pattern", "spatial", "date", "barcode"}
 
 
-def _readback(path: str, engine) -> str:
+def _readback_data(path: str, engine) -> tuple[str, list[TokenText]]:
     """Everything legible in the written file.
 
     For a PDF this is the crux, and it is why an OCR engine is threaded all the
@@ -685,12 +683,14 @@ def _readback(path: str, engine) -> str:
     """
     suffix = Path(path).suffix.lower()
     if suffix in OFFICE_SUFFIXES:
-        return office.text_of(path)
+        text = office.text_of(path)
+        return text, [TokenText.from_text(text)]
     chunks = []
+    pages: list[TokenText] = []
     if suffix in PDF_SUFFIXES:
         chunks.append(pdf.text_of(path))
     if engine is None:
-        return "\n".join(chunks)
+        return "\n".join(chunks), pages
     from .model import assign_lines
 
     from .ocr import read_pages
@@ -700,7 +700,9 @@ def _readback(path: str, engine) -> str:
             try:
                 for tokens in read_pages(engine, page_batch, number_batch):
                     assign_lines(tokens)
-                    chunks.append(TokenText(reading_order(tokens)).text)
+                    page = TokenText(reading_order(tokens))
+                    pages.append(page)
+                    chunks.append(page.text)
             finally:
                 for rendered in page_batch:
                     rendered.close()
@@ -720,10 +722,17 @@ def _readback(path: str, engine) -> str:
         try:
             tokens = read_pages(engine, [image])[0]
             assign_lines(tokens)
-            chunks.append(TokenText(reading_order(tokens)).text)
+            page = TokenText(reading_order(tokens))
+            pages.append(page)
+            chunks.append(page.text)
         finally:
             image.close()
-    return "\n".join(chunks)
+    return "\n".join(chunks), pages
+
+
+def _readback(path: str, engine) -> str:
+    """Compatibility wrapper returning only read-back text."""
+    return _readback_data(path, engine)[0]
 
 
 def _verify(path: str, report: Report, engine=None) -> tuple[list[str], list[str], list[str]]:
@@ -744,7 +753,7 @@ def _verify(path: str, report: Report, engine=None) -> tuple[list[str], list[str
     if suffix in IMAGE_SUFFIXES and engine is None:
         return [], [], ["image output not verified: no OCR engine"]
     try:
-        raw = _readback(path, engine)
+        raw, pattern_pages = _readback_data(path, engine)
     except Exception:
         # An unreadable output cannot be shown to be clean, so treat it as dirty.
         return ["<output unreadable>"], [], []
@@ -777,7 +786,12 @@ def _verify(path: str, report: Report, engine=None) -> tuple[list[str], list[str
             flagged_names.append(f"name still readable in output: {finding.replacement}")
             continue
         leaked.append(finding.value)
-    patterns, flagged = _verify_patterns(stripped)
+    patterns, flagged = [], []
+    pattern_inputs = pattern_pages or [TokenText.from_text(stripped)]
+    for page in pattern_inputs:
+        page_patterns, page_flags = _verify_patterns(page)
+        patterns.extend(page_patterns)
+        flagged.extend(page_flags)
     patterns += _verify_symbols(path)
     return sorted(set(leaked)), sorted(set(patterns)), flagged + sorted(set(flagged_names))
 
@@ -826,7 +840,7 @@ def _table_noise(span) -> bool:
     return False
 
 
-def _verify_patterns(text: str) -> tuple[list[str], list[str]]:
+def _verify_patterns(text: str | TokenText) -> tuple[list[str], list[str]]:
     """Gate 2: high-precision identifier shapes in the finished output.
 
     This deliberately derives identifier patterns from the finished document,
@@ -849,7 +863,7 @@ def _verify_patterns(text: str) -> tuple[list[str], list[str]]:
     """
     from .detect import DateDetector, PatternDetector
 
-    tt = TokenText.from_text(text)
+    tt = text if isinstance(text, TokenText) else TokenText.from_text(text)
     hits = PatternDetector().detect(tt)
     leaked = [s.text for s in hits if not _table_noise(s)]
     # Suppressed, not discarded. Something that looked like an identifier and
@@ -863,6 +877,20 @@ def _verify_patterns(text: str) -> tuple[list[str], list[str]]:
                if not any(c in s.text for c in "/-")]
     flagged += [
         f"unmasked {len(m.group(0))}-digit run in output"
-        for m in _LONG_DIGITS.finditer(text)
+        for m in _LONG_DIGITS.finditer(tt.text)
     ]
     return sorted(set(leaked)), sorted(set(flagged + noise))
+
+
+def _pattern_entity(value: str) -> str:
+    """Entity type of a Gate 2 value, using the same recognizers as the gate."""
+    from .detect import DateDetector, PatternDetector
+
+    tt = TokenText.from_text(value)
+    entities = {span.entity for span in PatternDetector().detect(tt)}
+    for entity in ("US_SSN", "EMAIL_ADDRESS", "PHONE_NUMBER"):
+        if entity in entities:
+            return entity
+    if DateDetector().detect(tt):
+        return "DATE"
+    return "ACCOUNT_NUMBER"

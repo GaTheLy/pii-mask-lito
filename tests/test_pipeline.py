@@ -212,6 +212,46 @@ def test_gate2_ignores_table_artefacts():
     assert leaked == ["000-00-0000"]
 
 
+def test_gate2_phone_shape_does_not_cross_distant_columns():
+    from pii_mask_lito.pipeline import _verify_patterns
+
+    tokens = [
+        Token("12", 0, (0.05, 0.20, 0.08, 0.22), 0),
+        Token("345678", 0, (0.70, 0.20, 0.78, 0.22), 0),
+    ]
+    assert _verify_patterns("12 345678")[0] == ["12 345678"]
+    assert _verify_patterns(TokenText(tokens))[0] == []
+
+    tokens[1].bbox = (0.081, 0.20, 0.16, 0.22)
+    assert _verify_patterns(TokenText(tokens))[0] == ["12 345678"]
+
+
+def test_verify_uses_geometry_preserved_by_readback(tmp_path, monkeypatch):
+    from pii_mask_lito import pipeline
+
+    output = tmp_path / "output.txt"
+    output.write_text("placeholder")
+    tokens = [
+        Token("12", 0, (0.05, 0.20, 0.08, 0.22), 0),
+        Token("345678", 0, (0.70, 0.20, 0.78, 0.22), 0),
+    ]
+    monkeypatch.setattr(
+        pipeline,
+        "_readback_data",
+        lambda _path, _engine: ("12 345678", [TokenText(tokens)]),
+    )
+    report = Report(source="source.txt", output=str(output), engine="test")
+    assert _verify(str(output), report) == ([], [], [])
+
+
+def test_gate2_retry_keeps_phone_entity_instead_of_guessing_date():
+    from pii_mask_lito.pipeline import _pattern_entity
+
+    assert _pattern_entity("+1-202-555-0199") == "PHONE_NUMBER"
+    assert _pattern_entity("10/03/2026") == "DATE"
+    assert _pattern_entity("000-00-0000") == "US_SSN"
+
+
 def test_barcode_payload_is_masked_and_stops_decoding():
     """C1. Rasterization preserves a symbol perfectly, and masking covered only
 
