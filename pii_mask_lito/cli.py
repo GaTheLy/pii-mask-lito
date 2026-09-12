@@ -102,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--report", help="write the masking report here (JSON)")
     parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="print value-free finding counts and normalized mask area grouped "
+             "by entity and detector source",
+    )
+    parser.add_argument(
         "--report-values",
         action="store_true",
         help="include the original values in the report. WARNING: this makes the "
@@ -290,6 +296,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"       review: {len(report.review)} item(s) require attention; "
                 "details are omitted from ordinary logs"
             )
+        if args.summary:
+            print(f"       summary for input {position + 1}:")
+            for row in report.summary():
+                print(
+                    f"         {row['entity']:<24} {row['source']:<12} "
+                    f"count={row['count']:<5} "
+                    f"normalized_box_area={row['normalized_box_area']:.6f}"
+                )
         for step in report.trace:
             detail = ", ".join(f"{k}={v}" for k, v in step.items() if k not in ("agent", "seconds"))
             print(f"       {step['agent']:<14} {step['seconds']:>6.1f}s  {detail}")

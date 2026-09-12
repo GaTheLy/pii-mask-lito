@@ -12,6 +12,7 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,18 @@ _TAG = re.compile(r"<[A-Z_]+#\d+>")
 # bounding resident page buffers for long documents.
 _SPOOL_PAGE_THRESHOLD = 8
 _PAGE_BATCH = 4
+_SAFE_FINDING_SOURCES = {
+    "agent", "barcode", "beside-name", "date", "pattern", "presidio",
+    "propagated", "recheck", "spatial", "structural", "vision",
+}
+
+
+def _public_entity(entity: str) -> str:
+    return entity if re.fullmatch(r"[A-Z][A-Z0-9_]*", entity or "") else "CUSTOM"
+
+
+def _public_source(source: str) -> str:
+    return source if source in _SAFE_FINDING_SOURCES else "custom"
 
 
 class MaskingError(RuntimeError):
@@ -66,6 +79,26 @@ class Report:
     doc_type: str = ""
     trace: list[dict] = field(default_factory=list)
 
+    def summary(self) -> list[dict]:
+        """Value-free finding counts and aggregate normalized mask area."""
+        counts: Counter[tuple[str, str]] = Counter()
+        areas: Counter[tuple[str, str]] = Counter()
+        for finding in self.findings:
+            key = (_public_entity(finding.entity), _public_source(finding.source))
+            counts[key] += 1
+            if finding.bbox is not None:
+                x0, y0, x1, y1 = finding.bbox
+                areas[key] += max(x1 - x0, 0.0) * max(y1 - y0, 0.0)
+        return [
+            {
+                "entity": entity,
+                "source": source,
+                "count": counts[(entity, source)],
+                "normalized_box_area": round(areas[(entity, source)], 6),
+            }
+            for entity, source in sorted(counts)
+        ]
+
     def to_json(self, indent: int = 2, values: bool = False) -> str:
         """Serialize the report, withholding sensitive content by default.
 
@@ -80,14 +113,8 @@ class Report:
             data["output"] = f"<output>{Path(self.output).suffix.lower()}"
             for finding in data["findings"]:
                 finding["value"] = ""
-                if not re.fullmatch(r"[A-Z][A-Z0-9_]*", finding["entity"] or ""):
-                    finding["entity"] = "CUSTOM"
-                if finding["source"] not in {
-                    "agent", "barcode", "beside-name", "date", "pattern",
-                    "presidio", "propagated", "recheck", "spatial",
-                    "structural", "vision",
-                }:
-                    finding["source"] = "custom"
+                finding["entity"] = _public_entity(finding["entity"])
+                finding["source"] = _public_source(finding["source"])
             data["leaked_count"] = len(data["leaked"])
             data["leaked_pattern_count"] = len(data["leaked_patterns"])
             data["review_count"] = len(data["review"])

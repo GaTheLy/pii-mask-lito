@@ -65,6 +65,9 @@ pii-mask-lito input.pdf -o output.pdf
 # Process several files into a directory and write a value-redacted report
 pii-mask-lito one.pdf two.docx -o masked/ --report masking-report.json
 
+# Print shareable, value-free counts and mask area by detector source
+pii-mask-lito input.pdf -o output.pdf --summary
+
 # Use a chosen OCR engine for image-only input
 pii-mask-lito scan.png -o scan-masked.png --ocr tesseract
 
@@ -118,6 +121,9 @@ an encrypted or otherwise access-controlled local volume for sensitive work.
 Text reports are safe by default: paths and detected values are redacted.
 `--report-values` deliberately includes original values for an audit workflow;
 treat such a report as sensitive source data and do not commit or share it.
+`--summary` prints only sanitized entity/source counts and aggregate normalized
+box area. It is intended for diagnosing over-masking without disclosing values,
+paths, page coordinates, or custom labels.
 
 The optional `--agents` mode can use a local or hosted vision-language model to
 suggest additional document context. It never supplies rendering coordinates;

@@ -524,6 +524,28 @@ def test_report_is_safe_by_default():
     assert "/records/Jordan_Example_123456789.pdf" in unsafe
 
 
+def test_report_summary_contains_only_sanitized_aggregate_metadata():
+    import json
+
+    report = Report(source="secret.pdf", output="masked.pdf", engine="test")
+    report.findings = [
+        Finding("PERSON", "Mira Calder", "<NAME#0>", 0.8, "presidio",
+                0, (0.1, 0.1, 0.2, 0.2)),
+        Finding("internal customer label", "CUS-1234", "<ID#0>", 0.8,
+                "private-rule", 0, (0.2, 0.2, 0.4, 0.3)),
+    ]
+    summary = report.summary()
+    encoded = json.dumps(summary)
+    assert summary == [
+        {"entity": "CUSTOM", "source": "custom", "count": 1,
+         "normalized_box_area": 0.02},
+        {"entity": "PERSON", "source": "presidio", "count": 1,
+         "normalized_box_area": 0.01},
+    ]
+    assert "Mira" not in encoded and "CUS-1234" not in encoded
+    assert "internal customer label" not in encoded and "private-rule" not in encoded
+
+
 def test_report_trace_is_withheld_by_default():
     report = Report(source="input.pdf", output="output.pdf", engine="test")
     report.doc_type = "Record for Sensitive Person"
