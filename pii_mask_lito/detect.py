@@ -26,7 +26,7 @@ LABELS: dict[str, tuple[str, ...]] = {
         "unique id", "identifier", "employee id", "customer id", "client id",
         "user id", "record id", "case id", "reference id", "document id",
         "order id", "transaction id", "ticket id", "asset id",
-        "hospital id", "doctor id",
+        "hospital id", "doctor id", "form", "form id", "form number",
     ),
     "MEDICAL_RECORD_NUMBER": (
         "mrn",
@@ -57,6 +57,11 @@ LABELS: dict[str, tuple[str, ...]] = {
         "certificate",
     ),
     "CLAIM_NUMBER": ("claim number", "claim no", "claim #", "claim id"),
+    "CREDIT_CARD": ("credit card", "card number", "card no", "card", "cc"),
+    "LOCATION": (
+        "address", "home address", "mailing address", "street address",
+        "location", "postal code", "zip code", "united states",
+    ),
 }
 
 PERSON_LABELS = (
@@ -69,20 +74,25 @@ PERSON_LABELS = (
 # real entity name, so a mix-up is a KeyError rather than a silent mask.
 _PROVIDER = object()
 
-# Optional organization detection for the healthcare profile. General NER also
-# recognizes organizations; this conservative structural form is useful when
-# OCR preserves capitalization but not sentence context.
+# Optional structural organization detection complements general NER when OCR
+# preserves capitalization but not sentence context.
+_ORG_WORD = r"[A-Z][A-Za-z&'\-]+"
 _FACILITY = re.compile(
-    r"\b[A-Z][A-Za-z&'\-]+(?:\s+[A-Z][A-Za-z&'\-]+){1,3}\s+"
+    rf"\b(?:{_ORG_WORD}(?:\s+{_ORG_WORD}){{1,3}}\s+"
     r"(?i:HOSPITAL|CLINIC|INSTITUTE|LABORATORY|LABS|PHARMACY|PHYSICIANS"
     r"|CENTER|CENTRE|HEALTHCARE|MEDICAL|HEALTH)"
-    r"(?:\s+(?i:INSTITUTE|CENTER|CENTRE|GROUP|SYSTEM|INC|LLC|LLP|CORP|PC))?"
+    rf"|{_ORG_WORD}(?:\s+{_ORG_WORD}){{0,2}}\s+"
+    r"(?i:ASSOCIATES|TECHNOLOGIES|TECHNOLOGY|LINES|CORPORATION|CORP|ORCHESTRA))"
+    r"(?:(?:\s+|,\s*)(?i:INSTITUTE|CENTER|CENTRE|GROUP|SYSTEM|INC|LLC|LLP|CORP|PC))?\b"
 )
 
 
 # Age labels are word-bounded so substrings such as "page" and "coverage" do
 # not claim nearby numbers. The profile supplies the minimum age.
-AGE_LABEL = re.compile(r"\b(?:age|dob|d\.o\.b|yrs|years?\s+old|y/o|birth)\b")
+AGE_LABEL = re.compile(
+    r"\b(?:age|aged|dob|d\.o\.b|yrs|years?\s+old|y/o|birth|turn|turned|turning"
+    r"|(?:he|she|they)\s+(?:is|was))\b"
+)
 _MIN_MASKED_AGE = 90
 _MAX_PLAUSIBLE_AGE = 130
 _AGE_VALUE = re.compile(r"^(\d{1,3})(?:[-\s]?(?:years?|yrs?)(?:[-\s]?old)?)?$", re.I)
@@ -90,10 +100,10 @@ _AGE_VALUE = re.compile(r"^(\d{1,3})(?:[-\s]?(?:years?|yrs?)(?:[-\s]?old)?)?$", 
 # Candidate identifiers may contain common system separators but must contain
 # a digit and be vouched for by a nearby label.
 _CANDIDATE = re.compile(
-    r"^(?=.{4,64}$)(?=.*\d)[A-Z0-9][A-Z0-9._:/\-]*$", re.I
+    r"^(?=.{3,64}$)(?=.*\d)[A-Z0-9][A-Z0-9._:/\-]*$", re.I
 )
 _HAS_DECIMAL = re.compile(r"\d\.\d")
-_TOKEN_EDGE = " \t.,;:()[]{}#<>|'\"/\\\u201c\u201d\u2018\u2019\u00ab\u00bb*~^\u00b0_-"
+_TOKEN_EDGE = " \t.,;:!?()[]{}#<>|'\"/\\\u201c\u201d\u2018\u2019\u00ab\u00bb*~^\u00b0_-"
 # Common OCR artifacts inside otherwise identifier-shaped tokens.
 _OCR_NOISE = re.compile(r"[\\|/_^~`\u00b7\u2022]")
 
@@ -102,8 +112,19 @@ _DATE_PATTERNS = [
     re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})"),
     re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})"),
 ]
+# OCR can split the four-digit year at a visual gap while preserving every
+# glyph, for example ``17/08/1 974``. The two year pieces must total exactly
+# four digits and still form a valid calendar date.
+_SPLIT_YEAR_DATE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{1,3})\s+(\d{1,3})")
+_FULL_DATE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})")
+_DATE_LABEL_REMNANT = re.compile(r"(?:d?ate|dated|dob|born|on|recorded)\W*$", re.I)
 _COMPACT_DATE = re.compile(r"\b(\d{2})(\d{2})(\d{4})\b")
 _SHORT_DATE = re.compile(r"\b(\d{2})(\d{2})(\d{2})\b")
+_RELATIVE_WEEKDAY = re.compile(
+    r"(?i:\b(?:meet|meeting|appointment|scheduled|on)[ \t]+)"
+    r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
+    re.I,
+)
 
 
 def _is_date(month: int, day: int, year: int) -> bool:
@@ -263,24 +284,28 @@ class SpatialContextDetector:
             age_match = _AGE_VALUE.match(stripped)
             if age_match:
                 age = int(age_match.group(1))
-                if not self.min_masked_age <= age <= _MAX_PLAUSIBLE_AGE:
-                    continue
-                context = f"{hint} {self.context_for(tt.tokens, i)}".strip().casefold()
-                compound = "year" in stripped.casefold() or "yr" in stripped.casefold()
-                if compound or AGE_LABEL.search(context):
-                    start = tt.offsets[i][0] + offset
-                    spans.append(
-                        Span(
-                            entity="AGE",
-                            start=start,
-                            end=start + len(stripped),
-                            score=0.8,
-                            text=stripped,
-                            tokens=[i],
-                            source="spatial",
+                if self.min_masked_age <= age <= _MAX_PLAUSIBLE_AGE:
+                    context = f"{hint} {self.context_for(tt.tokens, i)}".strip().casefold()
+                    compound = "year" in stripped.casefold() or "yr" in stripped.casefold()
+                    following = " ".join(
+                        token.text
+                        for token in tt.tokens[i + 1:i + 4]
+                        if (token.page, token.line) == (tok.page, tok.line)
+                    ).casefold()
+                    if compound or AGE_LABEL.search(context) or AGE_LABEL.search(following):
+                        start = tt.offsets[i][0] + offset
+                        spans.append(
+                            Span(
+                                entity="AGE",
+                                start=start,
+                                end=start + len(stripped),
+                                score=0.8,
+                                text=stripped,
+                                tokens=[i],
+                                source="spatial",
+                            )
                         )
-                    )
-                continue
+                        continue
 
             if not _CANDIDATE.match(clean) or _HAS_DECIMAL.search(clean):
                 continue
@@ -370,6 +395,108 @@ _CITY_STATE_ZIP = re.compile(
     r"\b([A-Z][A-Za-z.\-]+(?:\s+[A-Z][A-Za-z.\-]+){0,3}),?\s+"
     rf"({_STATE})\s+\d{{5}}(?:-\d{{4}})?\b"
 )
+_CITY_STATE = re.compile(
+    r"\b([A-Z][A-Za-z.\-]+(?:\s+[A-Z][A-Za-z.\-]+){0,3}),\s*"
+    rf"({_STATE})\b"
+)
+_LABELLED_LOCATION = re.compile(
+    r"(?i:\b(?:location|city|state|country)\b)\s*:\s+"
+    r"([A-Z][A-Za-z.'\-]*(?:\s+[A-Z][A-Za-z.'\-]*){0,3}?)"
+    r"(?=\s+(?i:(?:billing(?:\s+no)?|mrn|procedure\s+date|received\s+date"
+    r"|report\s+date|date|dob|age|ssn|id|phone|email|name|provider|doctor))\s*:|$)"
+)
+_LABELLED_NAME = re.compile(
+    r"(?i:\b(?:name|full\s+name|customer\s+name|employee\s+name|patient\s+name)\b)"
+    r"\s*:\s*([^\W\d_][\w'’\-]*(?:\s+[^\W\d_][\w'’\-]*){0,3})$"
+)
+_LABELLED_ADDRESS = re.compile(
+    r"(?i:\b(?:address|home\s+address|mailing\s+address|street\s+address)\b)"
+    r"\s*:\s*(\S(?:.*\S)?)$"
+)
+_PROSE_ADDRESS = re.compile(
+    r"(?i:\b(?:address|home\s+address|mailing\s+address|street\s+address)\s+is)"
+    r"\s+(\S(?:.*\S)?)$"
+)
+_UNIT_LINE = re.compile(r"(?i:\b(?:apt|apartment|suite|unit)\.?\s+[A-Za-z0-9-]+\b)")
+_INTERNATIONAL_STREET = re.compile(
+    r"\b[A-Z][\w'’.-]*(?:\s+[A-Za-z][\w'’.-]*){0,3}\s+"
+    r"(?i:STREET|ST|ROAD|RD|AVENUE|AVE|LANE|LN|DRIVE|DR|BOULEVARD|BLVD|WAY"
+    r"|COURT|CT|PLACE|PL|TERRACE|TRAIL|PARKWAY|CIRCLE|HIGHWAY|TEE|RUE|VIA"
+    r"|CALLE|STRASSE|STRAßE|UL)\.?\s+\d{1,6}\b"
+)
+_POSTAL_LINE = re.compile(
+    r"\b[A-Z][\w'’.-]*(?:\s+[A-Z][\w'’.-]*){0,2}\s+\d{5}(?:-\d{4})?$"
+)
+_CONTEXT_PERSON = (
+    re.compile(
+        r"(?i:\b(?:gender[ \t]+of|called|named|name[ \t]+is|directed[ \t]+by"
+        r"|written[ \t]+by|created[ \t]+by|signed[ \t]+by))[ \t]*:?[ \t]+"
+        r"([^\W\d_][\w'’\-]{1,30}(?:[ \t]+[A-ZÀ-ÖØ-Þ][\w'’\-]{1,30}){0,3})"
+    ),
+    re.compile(
+        r"(?i:\b(?:user|customer|client|applicant))[ \t]*:[ \t]*"
+        r"([^\W\d_][\w'’\-]*(?:[ \t]+[A-ZÀ-ÖØ-Þ][\w'’\-]*){0,3})"
+    ),
+    re.compile(
+        r"\b([^\W\d_][\w'’\-]{1,30})['’]s[ \t]+"
+        r"(?i:daughter|son|wife|husband|mother|father|sister|brother|partner)\b"
+    ),
+    re.compile(r"(?m)^([^\W\d_][\w'’\-]{1,30}):(?=\s|[\"'])"),
+)
+_CONTEXT_ORGANIZATION = (
+    re.compile(
+        r"(?i:\b(?:work(?:ed)?[ \t]+for|employed[ \t]+by|company|organization))"
+        r"[ \t]+"
+        r"([A-Z][A-Z0-9&.\-]{1,20})\b"
+    ),
+    re.compile(r"\b([A-Z][\w&'’\-]+)[ \t]+is[ \t]+a[ \t]+501\(c\)3\b"),
+)
+_CONTEXT_LOCATION = (
+    re.compile(
+        r"(?i:\b(?:home[ \t]+city|located[ \t]+in|based[ \t]+in|lives?[ \t]+in"
+        r"|moved[ \t]+to|born[ \t]+in))[ \t]+"
+        r"([^\W\d_][\w'’\-]*(?:[ \t]+[A-ZÀ-ÖØ-ÞΑ-Ω][\w'’\-]*){0,4})"
+        r"(?=[ \t]*[:,.;]|$)"
+    ),
+    re.compile(
+        r"(?i:\b(?:year|years)[ \t]+in)[ \t]+"
+        r"([^\W\d_][\w'’\-]*(?:[ \t]+[A-ZÀ-ÖØ-ÞΑ-Ω][\w'’\-]*){0,3})"
+        r"(?=[ \t]*[,.;]|$)"
+    ),
+)
+
+
+def _flat_address_blocks(tt: TokenText) -> list[Span]:
+    """Multiline flat-text address blocks with unit and postal evidence."""
+    if any(token.bbox is not None for token in tt.tokens) or "\n" not in tt.text:
+        return []
+    lines = list(re.finditer(r"[^\n]+", tt.text))
+    spans = []
+    for start_index, first in enumerate(lines):
+        prose = re.search(
+            r"(?i:\baddress(?:\s+of\s+.{1,80}?)?\s+is\s+)",
+            first.group(0),
+        )
+        first_text = re.sub(r"^\s*[^\w]+\s*", "", first.group(0))
+        if prose is None and not re.match(r"\d{1,6}\b", first_text):
+            continue
+        for end_index in range(start_index + 1, min(start_index + 7, len(lines))):
+            end = lines[end_index]
+            block = tt.text[first.start():end.end()]
+            end_text = re.sub(r"^\s*[^\w]+\s*", "", end.group(0)).strip()
+            if (not _UNIT_LINE.search(block)
+                    or not re.search(r"\b\d{5}(?:-\d{4})?$", end_text)):
+                continue
+            start = first.start() + (prose.end() if prose is not None else 0)
+            stop = end.end()
+            spans.append(Span(
+                "LOCATION", start, stop, 0.85, tt.text[start:stop],
+                tt.tokens_for(start, stop), "structural",
+            ))
+            break
+    return spans
+
+
 # A city/state pair can resemble a surname-first name.
 _STATE_ONLY = re.compile(rf"^({_STATE})$")
 
@@ -419,6 +546,7 @@ PATIENT_ADDRESS_LABELS = PATIENT_LABELS + (
     "patient address", "patient addr", "pat addr", "patient's address",
     "home address", "mailing address", "street address", "resides",
 )
+ADDRESS_BLOCK_LABELS = PATIENT_ADDRESS_LABELS + ("address", "location", "contact")
 
 # Organisations. Split out of FACILITY_LABELS because the two halves cannot be
 # used for the same job: the street furniture below is printed *inside* every
@@ -451,9 +579,60 @@ class StructuralDetector:
         Page text is a single stream; matching within visual line segments
         prevents structural regexes from crossing rows or columns.
         """
-        spans = []
+        spans = _flat_address_blocks(tt)
+        for pattern in _CONTEXT_PERSON:
+            for match in pattern.finditer(tt.text):
+                start, end = match.span(1)
+                spans.append(Span(
+                    "PERSON", start, end, 0.8, match.group(1),
+                    tt.tokens_for(start, end), "structural",
+                ))
+        if self.spatial.mask_organizations:
+            for pattern in _CONTEXT_ORGANIZATION:
+                for match in pattern.finditer(tt.text):
+                    start, end = match.span(1)
+                    spans.append(Span(
+                        "ORGANIZATION", start, end, 0.8, match.group(1),
+                        tt.tokens_for(start, end), "structural",
+                    ))
+        for pattern in _CONTEXT_LOCATION:
+            for match in pattern.finditer(tt.text):
+                start, end = match.span(1)
+                spans.append(Span(
+                    "LOCATION", start, end, 0.8, match.group(1),
+                    tt.tokens_for(start, end), "structural",
+                ))
         for text, offsets, indices in _lines(tt):
+            # A comma inside a digit-led address is not surname-first syntax:
+            # "731 Lantern Quays, North Ember" is one address line.
+            address_line = bool(re.match(r"^\s*\d{1,6}\b", text))
+            organization_line = bool(re.search(
+                r"\b(?:INC|LLC|LLP|CORP|ASSOCIATES)\b", text, re.I
+            ))
+            if (address_line and indices
+                    and _near_label(self.spatial, tt, indices[:1], ADDRESS_BLOCK_LABELS)):
+                # Address blocks often use generated or regional street suffixes
+                # that no finite suffix list can cover. A digit-led value directly
+                # under an explicit label is stronger evidence than vocabulary.
+                # Stop before an inline phone field so unrelated contact data keeps
+                # its own entity type and tag.
+                covered = []
+                for index in indices:
+                    word = normalize(tt.tokens[index].text).rstrip(":")
+                    if word in {"tel", "telephone", "phone", "ph", "fax"}:
+                        break
+                    covered.append(index)
+                if covered:
+                    start = tt.offsets[covered[0]][0]
+                    end = tt.offsets[covered[-1]][1]
+                    spans.append(Span(
+                        "LOCATION", start, end, 0.8,
+                        " ".join(tt.tokens[index].text for index in covered),
+                        covered, "structural",
+                    ))
             for m in _NAME_LAST_FIRST.finditer(text):
+                if address_line or organization_line:
+                    continue
                 # A city with a damaged ZIP, not a person. See _STATE_ONLY.
                 if _STATE_ONLY.match(m.group(2)):
                     continue
@@ -476,7 +655,26 @@ class StructuralDetector:
                     spans.append(
                         _localize(tt, m, offsets, indices, "ORGANIZATION", 0.7)
                     )
-            for pattern in (_STREET, _CITY_STATE_ZIP):
+            for m in _LABELLED_NAME.finditer(text):
+                spans.append(
+                    _localize(tt, m, offsets, indices, "PERSON", 0.8, group=1)
+                )
+            for m in _LABELLED_ADDRESS.finditer(text):
+                spans.append(
+                    _localize(tt, m, offsets, indices, "LOCATION", 0.8, group=1)
+                )
+            for m in _PROSE_ADDRESS.finditer(text):
+                spans.append(
+                    _localize(tt, m, offsets, indices, "LOCATION", 0.8, group=1)
+                )
+            for m in _LABELLED_LOCATION.finditer(text):
+                spans.append(
+                    _localize(tt, m, offsets, indices, "LOCATION", 0.8, group=1)
+                )
+            for pattern in (
+                _STREET, _CITY_STATE_ZIP, _CITY_STATE, _UNIT_LINE,
+                _INTERNATIONAL_STREET, _POSTAL_LINE,
+            ):
                 for m in pattern.finditer(text):
                     spans.append(_localize(tt, m, offsets, indices, "LOCATION", 0.7))
         return spans
@@ -505,7 +703,20 @@ class StructuralDetector:
 # High-confidence patterns are detected locally in addition to Presidio.
 # --------------------------------------------------------------------------
 _SSN = re.compile(r"\b\d{3}[-\s.]\d{2}[-\s.]\d{4}\b")
-_PHONE = re.compile(r"(?<!\d)(?:\+?1[-\s.])?\(?\d{3}\)?[-\s.]\d{3}[-\s.]\d{4}\b")
+_PHONE = re.compile(
+    r"(?<!\d)(?:\+?1[-\s.])?\(?\d{3}\)?[-\s.]\d{3}[-\s.]\d{4}"
+    r"(?:\s*(?:x|ext\.?)\s*\d{1,6})?\b",
+    re.I,
+)
+_INTERNATIONAL_PHONE = re.compile(
+    r"(?<![\w/])(?:\+\d{1,7}|\(\d{1,4}\)|\d{2,4})"
+    r"(?:[ .-]\d{2,6}){1,4}(?![\w/])"
+)
+_E164_PHONE = re.compile(r"(?<!\w)\+\d{7,15}\b")
+_TRAILING_LABEL_PHONE = re.compile(
+    r"\b\d{7,15}(?=[ \t]*-[ \t]*(?:fax|mobile|phone|office)\b)",
+    re.I,
+)
 
 
 # Toll-free US numbers usually identify organizations rather than people. This
@@ -543,12 +754,35 @@ def email_shaped(text: str) -> bool:
     return sum(c.isalpha() for c in local) >= _EMAIL_LOCAL_LETTERS
 
 
+def _geometrically_contiguous(tt: TokenText, indices: list[int]) -> bool:
+    """Whether matched tokens occupy one visual segment rather than columns."""
+    if len(indices) < 2:
+        return True
+    for left_index, right_index in zip(indices, indices[1:]):
+        left, right = tt.tokens[left_index], tt.tokens[right_index]
+        if (left.page, left.line) != (right.page, right.line):
+            return False
+        if left.bbox is None or right.bbox is None:
+            continue
+        height = max(
+            left.bbox[3] - left.bbox[1],
+            right.bbox[3] - right.bbox[1],
+            1e-6,
+        )
+        if right.bbox[0] - left.bbox[2] > max(0.03, 3 * height):
+            return False
+    return True
+
+
 class PatternDetector:
     """Deterministic recognizers for the entities that must never be missed."""
 
     PATTERNS = (
         ("US_SSN", _SSN, 0.9),
         ("PHONE_NUMBER", _PHONE, 0.85),
+        ("PHONE_NUMBER", _INTERNATIONAL_PHONE, 0.82),
+        ("PHONE_NUMBER", _E164_PHONE, 0.9),
+        ("PHONE_NUMBER", _TRAILING_LABEL_PHONE, 0.85),
         ("EMAIL_ADDRESS", _EMAIL, 0.9),
     )
 
@@ -557,6 +791,12 @@ class PatternDetector:
         for entity, pattern, score in self.PATTERNS:
             for m in pattern.finditer(tt.text):
                 if entity in ("US_SSN", "PHONE_NUMBER") and money_shaped(m.group(0)):
+                    continue
+                digits = sum(character.isdigit() for character in m.group(0))
+                if entity == "PHONE_NUMBER" and not 7 <= digits <= 15:
+                    continue
+                indices = tt.tokens_for(m.start(), m.end())
+                if entity == "PHONE_NUMBER" and not _geometrically_contiguous(tt, indices):
                     continue
                 if entity == "PHONE_NUMBER" and toll_free(m.group(0)):
                     continue
@@ -569,7 +809,7 @@ class PatternDetector:
                         end=m.end(),
                         score=score,
                         text=m.group(0),
-                        tokens=tt.tokens_for(m.start(), m.end()),
+                        tokens=indices,
                         source="pattern",
                     )
                 )
@@ -592,6 +832,16 @@ class DateDetector:
                 ok = _is_date(a, b, c) if c > 31 else _is_date(b, c, a)
                 if ok:
                     spans.append(self._span(tt, m))
+        for m in _SPLIT_YEAR_DATE.finditer(tt.text):
+            year_text = m.group(3) + m.group(4)
+            if len(year_text) != 4:
+                continue
+            covered = tt.tokens_for(m.start(), m.end())
+            if len({(tt.tokens[index].page, tt.tokens[index].line) for index in covered}) != 1:
+                continue
+            first, second, year = int(m.group(1)), int(m.group(2)), int(year_text)
+            if _is_date(first, second, year):
+                spans.append(self._span(tt, m))
         for m in _COMPACT_DATE.finditer(tt.text):
             month, day, year = (int(g) for g in m.groups())
             if _is_date(month, day, year):
@@ -600,17 +850,68 @@ class DateDetector:
             month, day, yy = (int(g) for g in m.groups())
             if _is_date(month, day, 2000 + yy):
                 spans.append(self._span(tt, m))
+        for m in _RELATIVE_WEEKDAY.finditer(tt.text):
+            spans.append(self._span(tt, m, group=1))
+        for span in self._fragmented(tt):
+            if not any(span.overlaps(existing) for existing in spans):
+                spans.append(span)
         return spans
 
     @staticmethod
-    def _span(tt: TokenText, m: re.Match) -> Span:
+    def _fragmented(tt: TokenText) -> list[Span]:
+        """Reassemble a date split across up to three adjacent OCR tokens."""
+        spans = []
+        for start, first in enumerate(tt.tokens):
+            tail = re.search(r"(\d[\d/-]*)$", first.text)
+            if tail is None:
+                continue
+            prefix = first.text[:tail.start()]
+            if prefix and not _DATE_LABEL_REMNANT.search(prefix):
+                continue
+            candidate = tail.group(1)
+            covered = [start]
+            previous = first
+            for index in range(start + 1, min(start + 3, len(tt.tokens))):
+                token = tt.tokens[index]
+                if (token.page, token.line) != (first.page, first.line):
+                    break
+                if previous.bbox is not None and token.bbox is not None:
+                    height = max(
+                        previous.bbox[3] - previous.bbox[1],
+                        token.bbox[3] - token.bbox[1],
+                        1e-6,
+                    )
+                    if token.bbox[0] - previous.bbox[2] > 1.5 * height:
+                        break
+                if not re.fullmatch(r"[\d/-]+", token.text):
+                    break
+                candidate += token.text
+                covered.append(index)
+                previous = token
+                match = _FULL_DATE.fullmatch(candidate)
+                if match is None:
+                    continue
+                first_part, second_part, year = (int(group) for group in match.groups())
+                if not _is_date(first_part, second_part, year):
+                    continue
+                start_offset = tt.offsets[start][0] + tail.start()
+                spans.append(Span(
+                    "DATE", start_offset, tt.offsets[index][1], 0.85,
+                    candidate, covered.copy(), "date",
+                ))
+                break
+        return spans
+
+    @staticmethod
+    def _span(tt: TokenText, m: re.Match, group: int = 0) -> Span:
+        start, end = m.span(group)
         return Span(
             entity="DATE",
-            start=m.start(),
-            end=m.end(),
+            start=start,
+            end=end,
             score=0.85,
-            text=m.group(0),
-            tokens=tt.tokens_for(m.start(), m.end()),
+            text=m.group(group),
+            tokens=tt.tokens_for(start, end),
             source="date",
         )
 
@@ -785,6 +1086,12 @@ class Detector:
         """
         if entity == "PHONE_NUMBER" and money_shaped(value):
             return False
+        if (entity == "URL" and not re.match(r"(?i)(?:https?://|www\.)", value)
+                and re.search(r"\.[A-Z]", value)):
+            # OCR frequently glues a sentence boundary into ``word.Next``.
+            # A capitalized apparent TLD without a URL marker is prose, not a
+            # bare domain.
+            return False
         if not self.mask_providers and entity in _PROVIDER_SUPPRESSIBLE:
             tokens = tt.tokens_for(start, end)
             if _near_label(self.spatial, tt, tokens, PROVIDER_LABELS):
@@ -889,11 +1196,17 @@ def _line_text(tt: TokenText, indices: list[int]):
     return " ".join(parts), offsets, indices
 
 
-def _localize(tt: TokenText, m, offsets, indices, entity: str, score: float) -> Span:
+def _localize(tt: TokenText, m, offsets, indices, entity: str, score: float,
+              group: int = 0) -> Span:
     """Convert a per-line match back to page-level offsets and token indices."""
-    covered = [indices[k] for k, (s, e) in enumerate(offsets) if s < m.end() and e > m.start()]
+    local_start, local_end = m.span(group)
+    covered = [
+        indices[k]
+        for k, (start, end) in enumerate(offsets)
+        if start < local_end and end > local_start
+    ]
     if not covered:
-        return Span(entity, 0, 0, score, m.group(0), [], "structural")
+        return Span(entity, 0, 0, score, m.group(group), [], "structural")
     start = min(tt.offsets[i][0] for i in covered)
     end = max(tt.offsets[i][1] for i in covered)
     text = " ".join(tt.tokens[i].text for i in covered)
@@ -920,11 +1233,14 @@ def _inside(span: Span, ranges: list[tuple[int, int]]) -> bool:
 
 
 def _generic_name(span: Span) -> bool:
-    """Return whether every word in a PERSON span is document vocabulary."""
-    if span.entity != "PERSON":
+    """Return whether a PERSON/ORGANIZATION span is document vocabulary."""
+    if span.entity not in {"PERSON", "ORGANIZATION"}:
         return False
     words = normalize(span.text).split()
-    return bool(words) and all(w in UI_NOISE or w in _TOO_COMMON for w in words)
+    return bool(words) and all(
+        w in UI_NOISE or w in _TOO_COMMON or _common_compound(w)
+        for w in words
+    )
 
 
 # --------------------------------------------------------------------------
@@ -941,11 +1257,32 @@ _TOO_COMMON = {
     "po", "box", "apt", "suite", "unit", "floor", "mail",
     "llc", "inc", "corp", "company", "ltd", "group", "id",
     "customer", "client", "employee", "recipient", "applicant", "holder",
-    "case", "support",
+    "case", "support", "patient", "doctor", "encounter", "participant",
+    "summary", "information", "notes", "service", "confirmation", "contact",
+    "location", "electronically", "signed", "dob", "unique", "subjective",
+    "observations", "vitamin", "level", "levels", "coordinator", "for",
+    "healthplans", "xray", "diagnostic", "form", "report",
 }
 
 UI_NOISE = {"select", "filter", "export", "update", "none", "total", "balance"}
 _MIN_PROPAGATE = 2
+
+
+def _common_compound(word: str) -> bool:
+    """Whether an OCR-concatenated token consists only of document terms."""
+    if len(word) < 8:
+        return False
+    reachable = {0}
+    vocabulary = UI_NOISE | _TOO_COMMON
+    for start in range(len(word)):
+        if start not in reachable:
+            continue
+        reachable.update(
+            start + len(part)
+            for part in vocabulary
+            if word.startswith(part, start)
+        )
+    return len(word) in reachable
 
 # OCR confusion folding is restricted to long alphanumeric identifiers.
 _CONFUSION = str.maketrans("OoIiLlSsBbZzGg", "00111155882266")

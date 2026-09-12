@@ -180,7 +180,7 @@ def mask_rects(
             if tt.tokens[index].page == page and tt.tokens[index].bbox is not None
         ]
         right_margin = margin
-        if span.source == "date" and any(token.confidence < 1.0 for token in page_tokens):
+        if span.entity == "DATE" and any(token.confidence < 1.0 for token in page_tokens):
             right_margin = max(right_margin, height * 1.5)
         rects.append(
             (page, (

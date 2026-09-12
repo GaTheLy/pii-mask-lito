@@ -250,10 +250,9 @@ def _ocr_or_none(name: str, src: str, report: Report):
 def _loop_engine(engine, ocr_engine: str, loop_ocr: str, report: Report):
     """The engine that drives the recheck loop, which need not be the fast one.
 
-    Sixty of the hundred page-reads a ten-page document costs happen in that
-    loop, so on an expensive engine it is the whole runtime. Falling back to a
-    cheap engine there takes an hour down to roughly twenty minutes without
-    touching extraction, where accuracy actually decides what can be masked.
+    Iterative rechecks can dominate runtime on an expensive engine. A cheaper
+    installed engine can search the already-learned lexicon there without
+    changing the primary extraction engine, where OCR accuracy is decisive.
     """
     if engine is None:
         return None

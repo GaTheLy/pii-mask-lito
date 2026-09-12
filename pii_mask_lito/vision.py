@@ -75,6 +75,26 @@ def _looks_read(text: str) -> bool:
     return digits > alpha
 
 SIGNATURE_LABELS = ("signature", "signed", "sign here", "authorized by")
+_SIGNATURE_LABEL = re.compile(r"\b(?:signature|signed|sign\s+here|authorized\s+by)\b")
+_ELECTRONIC_SIGNATURE = {"electronically", "digitally"}
+
+
+def _is_signature_label(index: int, tokens: list) -> bool:
+    """Whether a token labels nearby handwritten ink, not typed e-sign text."""
+    token = tokens[index]
+    folded = token.text.casefold()
+    if not _SIGNATURE_LABEL.search(folded):
+        return False
+    if _ELECTRONIC_SIGNATURE & set(re.findall(r"[a-z]+", folded)):
+        return False
+    # OCR normally splits a line into words, so "electronically signed" may be
+    # two tokens. A typed e-sign statement does not imply adjacent handwriting.
+    return not any(
+        other.page == token.page
+        and other.line == token.line
+        and other.text.casefold().strip(" .,:;") in _ELECTRONIC_SIGNATURE
+        for other in tokens
+    )
 
 
 def available() -> bool:
@@ -209,10 +229,10 @@ def signatures(image: Image.Image, tokens: list) -> list[tuple[float, float, flo
     could be defeated by a single hallucinated fragment.
     """
     boxes = []
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if token.bbox is None:
             continue
-        if not any(label in token.text.casefold() for label in SIGNATURE_LABELS):
+        if not _is_signature_label(index, tokens):
             continue
         x0, y0, x1, y1 = token.bbox
         line = max(y1 - y0, 1e-6)
@@ -253,7 +273,7 @@ def signature_ink(image: Image.Image, tokens: list) -> list[tuple[float, float, 
     for region in unread_ink(image, tokens):
         x0, y0, x1, y1 = region
         height = y1 - y0
-        for token in tokens:
+        for index, token in enumerate(tokens):
             if token.bbox is None:
                 continue
             tx0, ty0, tx1, ty1 = token.bbox
@@ -262,7 +282,7 @@ def signature_ink(image: Image.Image, tokens: list) -> list[tuple[float, float, 
                 continue  # not on the same line as the ink
             if not -_LABEL_OVERLAP <= x0 - tx1 <= _LABEL_GAP:
                 continue  # not immediately to its left
-            if any(l in token.text.casefold() for l in SIGNATURE_LABELS):
+            if _is_signature_label(index, tokens):
                 break  # readable caption: signatures() already owns this region
             if (token.confidence < _READ_CONFIDENCE
                     or not _looks_read(token.text)):
@@ -313,12 +333,10 @@ _INK_PAD = 0.002
 def _without_rules(mask, cv2, np):
     """The ink, minus every long straight line in it.
 
-    Necessary, and the first version of this file did not have it. Requiring
-    two-dimensional spread was supposed to reject gridlines on its own, and it
-    rejects a line but not a *crossing*: where a table's horizontal and vertical
-    rules meet, the cell has ink in every row (from the vertical) and every
-    column (from the horizontal), so an empty table cell scored as handwriting
-    and every ruled form flagged every page.
+    Two-dimensional spread rejects a line but not a *crossing*: where a table's
+    horizontal and vertical rules meet, the cell has ink in every row (from the
+    vertical) and every column (from the horizontal), so an empty table cell can
+    otherwise resemble handwriting.
 
     Morphological opening with a long thin kernel keeps only ink that runs
     straight for `_RULE_LENGTH` of the page, which is what a rule does and what

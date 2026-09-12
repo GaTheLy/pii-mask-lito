@@ -144,11 +144,10 @@ def _post(url: str, payload: dict, timeout: int, headers: dict | None = None,
     """POST JSON, retrying the failures that are worth retrying.
 
     Retries exist for the hosted path. A local server either answers or is down,
-    but an API rate-limits, and a 100-page document is 300 calls: without this a
-    single 429 two hundred pages in costs that page its recall silently, which
-    is the one failure mode this tool is built to not have. 5xx and connection
-    resets get the same treatment; 4xx other than 429 is a bad request and
-    retrying it just wastes the quota.
+    while an API may rate-limit a multi-page job. Without retries, one transient
+    response can silently remove an entire page from the model-assisted pass.
+    5xx and connection resets get the same treatment; 4xx other than 429 is a
+    bad request and retrying it just wastes the quota.
     """
     request = urllib.request.Request(
         url, data=json.dumps(payload).encode(),

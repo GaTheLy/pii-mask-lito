@@ -638,8 +638,8 @@ def loop_engine_name(primary: str, requested: str = "auto") -> str:
     read becomes a token that never exists, and nothing downstream can mask it.
     The recheck loop is a different job -- it re-reads pages that have already
     been masked, hunting occurrences of values the lexicon now knows, which is
-    mostly propagation and needs no special sharpness. It is also sixty of the
-    hundred page-reads a ten-page document costs.
+    mostly propagation and needs no special sharpness. Repeated passes make
+    this stage an important part of end-to-end latency.
 
     So when the primary engine is an expensive one and a cheap one is installed,
     the loop runs on the cheap one. Verification is deliberately *not* included:

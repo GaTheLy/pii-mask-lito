@@ -276,6 +276,25 @@ def test_signature_block_is_ink_without_words():
     assert found[0][1] < 0.5, "the signature block, not the empty witness line"
 
 
+def test_typed_electronic_signature_text_is_not_a_signature_region():
+    from PIL import Image, ImageDraw
+
+    from pii_mask_lito import vision
+
+    if not vision.available():
+        return
+    image = Image.new("RGB", (800, 300), "white")
+    draw = ImageDraw.Draw(image)
+    for offset in range(0, 180, 3):
+        draw.line([(300 + offset, 70 + (offset % 30)), (310 + offset, 90)],
+                  fill="black", width=3)
+    tokens = [
+        Token("Electronically", 0, (0.10, 0.20, 0.23, 0.25), 0),
+        Token("signed", 0, (0.24, 0.20, 0.30, 0.25), 0),
+    ]
+    assert vision.signatures(image, tokens) == []
+
+
 def test_yunet_weights_ship_and_haar_still_covers_for_them():
     """Safe Harbor #17 has no room for "we could not check".
 

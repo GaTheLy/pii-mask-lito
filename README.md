@@ -156,6 +156,24 @@ masking and a coarse over-masking signal. Results vary with OCR engine,
 hardware, source quality, and selected profile; do not treat one run as a
 general accuracy claim.
 
+For an independently authored, cross-domain text check, the repository also
+supports Microsoft Presidio Research's MIT-licensed synthetic corpus:
+
+```bash
+git clone https://github.com/microsoft/presidio-research.git /tmp/presidio-research
+git -C /tmp/presidio-research checkout f1deaaf3dfaf69f9a803d9ae72b185c752fa217d
+python -m tests.benchmark.presidio_synth \
+  /tmp/presidio-research/data/synth_dataset_v2.json --limit 200
+```
+
+The adapter does not download or redistribute the dataset. It reports masking
+coverage only for entity families this project supports and states the omitted
+external labels explicitly.
+
+The pinned dataset file has SHA-256
+`ec08a771ba8135314cafb60752b2295212222ba3a4cd75d73811839c699e0012`;
+the runner prints the hash it actually evaluated.
+
 ## Contributing and security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and data-handling rules,
