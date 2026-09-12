@@ -115,6 +115,21 @@ def test_concatenated_document_heading_is_not_a_person():
     assert _generic_name(span)
 
 
+def test_common_document_words_are_never_people_or_organizations():
+    for word in (
+        "category", "order", "section", "quantity", "department",
+        "procedure", "result", "reference", "billing", "provider",
+    ):
+        assert _generic_name(Span("PERSON", 0, len(word), 0.8, word, [0]))
+        assert _generic_name(Span("ORGANIZATION", 0, len(word), 0.8, word, [0]))
+
+
+def test_common_document_words_cannot_propagate_from_a_polluted_lexicon():
+    detector = Detector(entities=["PERSON"])
+    detector.lexicon.update({"category": "PERSON", "order": "PERSON"})
+    assert detector.propagate(TokenText.from_text("Category Order")) == []
+
+
 def test_flat_text_uses_preceding_label():
     tt = TokenText.from_text("Reference ID REF-5509-ZINC")
     found = {(span.entity, span.text) for span in SpatialContextDetector().detect(tt)}

@@ -1280,6 +1280,10 @@ _TOO_COMMON = {
     "location", "electronically", "signed", "dob", "unique", "subjective",
     "observations", "vitamin", "level", "levels", "coordinator", "for",
     "healthplans", "xray", "diagnostic", "form", "report",
+    "category", "order", "section", "item", "items", "quantity", "product",
+    "department", "procedure", "result", "reason", "details", "reference",
+    "subject", "table", "contents", "billing", "facility", "provider",
+    "organization", "office", "receipt",
 }
 
 UI_NOISE = {"select", "filter", "export", "update", "none", "total", "balance"}
@@ -1426,7 +1430,8 @@ def propagate(detector: "Detector", tt: TokenText) -> list[Span]:
         if not entity or entity not in detector.entities:
             continue
         if entity == "PERSON":
-            if key in UI_NOISE or _suppressed(detector, tt, i, key):
+            if (key in UI_NOISE or key in _TOO_COMMON
+                    or _suppressed(detector, tt, i, key)):
                 continue
         start = tt.offsets[i][0] + token.text.find(stripped)
         if any(s <= start and start + len(stripped) <= e for s, e in allowed):
