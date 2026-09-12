@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from pii_mask_lito import symbols, vision
+from pii_mask_lito import ocr, symbols, vision
 from pii_mask_lito.detect import Detector
 from pii_mask_lito.pipeline import mask
 from pii_mask_lito.registry import TagRegistry
@@ -45,6 +45,8 @@ def _page(tmp_path, *, barcode=False, signature=False):
 
 
 def _mask(path, tmp_path, **kwargs):
+    if not ocr.available():
+        pytest.skip("an OCR extra is required for standalone image masking")
     out = tmp_path / "masked.png"
     return mask(str(path), str(out), detector=Detector(), registry=TagRegistry(),
                 verify=False, **kwargs), out
