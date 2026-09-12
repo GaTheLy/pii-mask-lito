@@ -550,7 +550,7 @@ def test_long_pdf_uses_disk_backed_page_storage(tmp_path, monkeypatch):
     src, dest = tmp_path / "long.pdf", tmp_path / "masked.pdf"
     document = canvas.Canvas(str(src), pagesize=(180, 240))
     for page in range(_SPOOL_PAGE_THRESHOLD):
-        document.drawString(12, 210, f"Synthetic page {page + 1}")
+        document.drawString(12, 210, f"Synthetic long document page {page + 1}")
         document.showPage()
     document.save()
 
