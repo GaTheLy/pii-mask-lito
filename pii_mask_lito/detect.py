@@ -18,6 +18,10 @@ from .model import Span, Token, TokenText, merge_spans
 from .policy import DEFAULT_ALLOWLIST, profile as policy_profile
 from .registry import normalize
 
+
+class DetectorConfigurationError(RuntimeError):
+    """Raised for an unusable detector configuration before analysis starts."""
+
 # --------------------------------------------------------------------------
 # Label -> entity. Matched against the text spatially adjacent to a candidate.
 # --------------------------------------------------------------------------
@@ -993,6 +997,20 @@ class Detector:
         # Built lazily: loading a spaCy model costs seconds, and the flat-text
         # formats can be masked without ever touching it.
         if self._analyzer is None:
+            import importlib.util
+            from pathlib import Path
+
+            model_path = Path(self._spacy_model)
+            try:
+                installed = importlib.util.find_spec(self._spacy_model) is not None
+            except (ImportError, ModuleNotFoundError, ValueError):
+                installed = False
+            if not model_path.exists() and not installed:
+                raise DetectorConfigurationError(
+                    f"spaCy model {self._spacy_model!r} is not installed; install it "
+                    f"with `python -m spacy download {self._spacy_model}` or pass "
+                    "--spacy-model /path/to/a/compatible-model"
+                )
             from presidio_analyzer import AnalyzerEngine
             from presidio_analyzer.nlp_engine import NlpEngineProvider
 

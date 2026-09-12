@@ -6,6 +6,8 @@ Each check targets a safety or geometry invariant using invented data.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pii_mask_lito.detect import DateDetector, Detector
@@ -425,6 +427,29 @@ def test_bad_report_path_fails_before_any_work():
     assert cli_main(["samples/note.txt", "-o", str(out), "--report", f"{out}/r.json"]) == 0
     assert (out / "r.json").exists()
     shutil.rmtree(out, ignore_errors=True)
+
+
+def test_cli_confidence_score_is_bounded():
+    from pii_mask_lito.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["in.txt", "-o", "out.txt", "--min-score", "0.6"])
+    assert args.min_score == 0.6
+    with pytest.raises(SystemExit):
+        parser.parse_args(["in.txt", "-o", "out.txt", "--min-score", "1.1"])
+
+
+def test_cli_reports_missing_spacy_model_without_a_traceback(tmp_path, capsys):
+    from pii_mask_lito.cli import main as cli_main
+
+    out = tmp_path / "masked.txt"
+    code = cli_main([
+        "samples/note.txt", "-o", str(out),
+        "--spacy-model", "pii_mask_missing_test_model",
+    ])
+    captured = capsys.readouterr()
+    assert code == 1 and not out.exists()
+    assert "FAIL input 1: spaCy model" in captured.err
 
 
 def test_report_is_safe_by_default():

@@ -58,18 +58,23 @@ def _positions(text: str, start: int, end: int) -> set[int]:
     }
 
 
-def score(rows: list[dict], show_values: bool = False) -> dict:
+def score(rows: list[dict], show_values: bool = False,
+          spacy_model: str = "en_core_web_lg", min_score: float = 0.4) -> dict:
     truth_chars: set[tuple[int, int]] = set()
     predicted_chars: set[tuple[int, int]] = set()
     truth_by_entity: Counter[str] = Counter()
     missed_by_entity: Counter[str] = Counter()
     missed_examples: dict[str, list[dict]] = {}
 
-    shared = Detector(mask_organizations=True)
+    shared = Detector(
+        mask_organizations=True, spacy_model=spacy_model, min_score=min_score
+    )
     analyzer = shared.analyzer
     for row_number, row in enumerate(rows):
         text = row["full_text"]
-        detector = Detector(mask_organizations=True)
+        detector = Detector(
+            mask_organizations=True, spacy_model=spacy_model, min_score=min_score
+        )
         detector._analyzer = analyzer
         predicted = detector.detect(TokenText.from_text(text))
 
@@ -132,6 +137,8 @@ def main(argv=None) -> int:
     parser.add_argument("dataset", help="path to synth_dataset_v2.json")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--spacy-model", default="en_core_web_lg")
+    parser.add_argument("--min-score", type=float, default=0.4)
     parser.add_argument(
         "--show-values",
         action="store_true",
@@ -144,7 +151,14 @@ def main(argv=None) -> int:
     rows = json.loads(payload)
     if args.limit and args.limit < len(rows):
         rows = random.Random(args.seed).sample(rows, args.limit)
-    result = score(rows, show_values=args.show_values)
+    if not 0 <= args.min_score <= 1:
+        parser.error("--min-score must be between 0 and 1")
+    result = score(
+        rows,
+        show_values=args.show_values,
+        spacy_model=args.spacy_model,
+        min_score=args.min_score,
+    )
     print(f"dataset sha256 {hashlib.sha256(payload).hexdigest()}")
     print(
         f"samples {result['samples']}  spans {result['truth_spans']}  "

@@ -37,11 +37,17 @@ Python 3.10 or later is required.
 
 ```bash
 pip install pii-mask-lito
+python -m spacy download en_core_web_lg
 
 # OCR for scans and standalone images
 pip install 'pii-mask-lito[tesseract]'
 # Install the native Tesseract program with your operating-system package manager.
 ```
+
+The spaCy model is an explicit installation step so the masking command never
+downloads model files or contacts a model registry while processing a document.
+For transformer NER, install `pii-mask-lito[accurate]`, install a compatible
+spaCy transformer pipeline separately, and select it with `--spacy-model`.
 
 For a container image with Tesseract and the spaCy model included:
 
@@ -67,6 +73,9 @@ pii-mask-lito input.pdf -o output.pdf --profile hipaa-safe-harbor
 
 # Tune a policy for a known document class
 pii-mask-lito input.pdf -o output.pdf --mask-organizations --min-masked-age 0
+
+# Raise the NER confidence floor when false-positive names dominate
+pii-mask-lito input.pdf -o output.pdf --min-score 0.6
 ```
 
 Run `pii-mask-lito --help` for the full option list. The tool verifies rendered

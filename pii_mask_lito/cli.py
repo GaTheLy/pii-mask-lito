@@ -7,11 +7,21 @@ import re
 import sys
 from pathlib import Path
 
-from .detect import Detector
+from .detect import Detector, DetectorConfigurationError
 from .model import TokenText, merge_spans
 from .pipeline import MaskingError, mask
 from .policy import PROFILES
 from .registry import TagRegistry
+
+
+def _probability(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number from 0 to 1") from exc
+    if not 0 <= number <= 1:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return number
 
 
 def _safe_name(name: str, detector: Detector, registry: TagRegistry) -> str:
@@ -77,7 +87,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dpi", type=int, default=300,
         help="raster DPI for OCR and PDF output (below 300 costs OCR accuracy)")
-    parser.add_argument("--spacy-model", default="en_core_web_lg")
+    parser.add_argument(
+        "--spacy-model",
+        default="en_core_web_lg",
+        help="installed spaCy model package or local model path used for NER "
+             "(default: en_core_web_lg)",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=_probability,
+        default=0.4,
+        help="minimum Presidio/NER confidence from 0 to 1 (default: 0.4; "
+             "higher favors precision, lower favors recall)",
+    )
     parser.add_argument("--report", help="write the masking report here (JSON)")
     parser.add_argument(
         "--report-values",
@@ -209,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     detector = Detector(entities=args.entities, spacy_model=args.spacy_model,
+                        min_score=args.min_score,
                         mask_providers=args.mask_providers,
                         mask_organizations=args.mask_organizations,
                         min_masked_age=args.min_masked_age,
@@ -247,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
                 loop_ocr=args.loop_ocr,
                 mask_unread_ink=args.mask_unread_ink,
             )
-        except MaskingError as exc:
+        except (MaskingError, DetectorConfigurationError) as exc:
             print(f"FAIL input {position + 1}: {exc}", file=sys.stderr)
             failed += 1
             continue

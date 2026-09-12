@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from pii_mask_lito.detect import (
     DateDetector,
     Detector,
@@ -394,6 +396,12 @@ def test_general_and_hipaa_profiles_are_distinct():
 def test_explicit_empty_configuration_stays_empty():
     detector = Detector(entities=[], allowlist=[])
     assert detector.entities == [] and detector.allowlist == set()
+
+
+def test_missing_spacy_model_fails_offline_with_install_instructions():
+    detector = Detector(spacy_model="pii_mask_missing_test_model")
+    with pytest.raises(RuntimeError, match="python -m spacy download"):
+        detector.detect(TokenText.from_text("Name: Mira Calder"))
 
 
 def test_explicit_allowlist_handles_multiword_value():
