@@ -9,7 +9,7 @@ Python 3.10 or newer is required.
 
 ```bash
 git clone <your fork>
-cd pii-mask-service
+cd pii-mask-lito
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'

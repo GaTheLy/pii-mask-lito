@@ -10,10 +10,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+keywords = ["pii", "privacy", "redaction", "de-identification", "ocr"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
 
@@ -30,6 +35,11 @@ dependencies = [
     "python-docx>=1.1",     # MIT
     "openpyxl>=3.1",        # MIT
 ]
+
+[project.urls]
+Homepage = "https://github.com/GaTheLy/pii-mask-lito"
+Repository = "https://github.com/GaTheLy/pii-mask-lito"
+Issues = "https://github.com/GaTheLy/pii-mask-lito/issues"
 
 [project.optional-dependencies]
 # Test runner. The suite is plain asserts, so pytest is the only thing needed;
