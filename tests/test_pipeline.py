@@ -238,7 +238,9 @@ def test_verify_uses_geometry_preserved_by_readback(tmp_path, monkeypatch):
     monkeypatch.setattr(
         pipeline,
         "_readback_data",
-        lambda _path, _engine: ("12 345678", [TokenText(tokens)]),
+        lambda _path, _engine, _symbol_leaks=None: (
+            "12 345678", [TokenText(tokens)]
+        ),
     )
     report = Report(source="source.txt", output=str(output), engine="test")
     assert _verify(str(output), report) == ([], [], [])
@@ -292,6 +294,29 @@ def test_barcode_payload_is_masked_and_stops_decoding():
         for image in pdf_module.page_images(dest)
         for r in zxingcpp.read_barcodes(image)
     ], "output still decodes"
+
+
+def test_verify_reuses_ocr_render_for_barcode_gate(tmp_path, monkeypatch):
+    from pii_mask_lito import pipeline
+
+    output = tmp_path / "output.pdf"
+    output.write_bytes(b"synthetic placeholder")
+
+    def readback(_path, _engine, symbol_leaks=None):
+        assert symbol_leaks is not None
+        symbol_leaks.append("decodable symbol on page 1")
+        return "", []
+
+    monkeypatch.setattr(pipeline.symbols, "available", lambda: True)
+    monkeypatch.setattr(pipeline, "_readback_data", readback)
+    monkeypatch.setattr(
+        pipeline, "_verify_symbols",
+        lambda _path: pytest.fail("output pages must not be rendered twice"),
+    )
+    report = Report(source="input.pdf", output=str(output), engine="test")
+    assert _verify(str(output), report, engine=object())[1] == [
+        "decodable symbol on page 1"
+    ]
 
 
 def test_signature_block_is_ink_without_words():
@@ -370,6 +395,36 @@ def test_yunet_weights_ship_and_haar_still_covers_for_them():
         assert vision.faces(blank) == [], "the fallback must run, not raise"
     finally:
         vision._YUNET = original
+
+
+def test_yunet_detector_is_reused_and_resized_between_pages(monkeypatch):
+    from pii_mask_lito import vision
+
+    class FakeDetector:
+        sizes = []
+
+        def setInputSize(self, size):
+            self.sizes.append(size)
+
+    detector = FakeDetector()
+
+    class FakeFactory:
+        calls = []
+
+        @classmethod
+        def create(cls, path, _config, size, score):
+            cls.calls.append((path, size, score))
+            return detector
+
+    class FakeCV2:
+        FaceDetectorYN = FakeFactory
+
+    monkeypatch.setattr(vision, "_YUNET_CACHE", None)
+    first = vision._yunet_detector(FakeCV2, (800, 1000))
+    second = vision._yunet_detector(FakeCV2, (1200, 900))
+    assert first is second is detector
+    assert len(FakeFactory.calls) == 1
+    assert detector.sizes == [(1200, 900)]
 
 
 def test_unread_ink_finds_handwriting_and_ignores_a_ruled_table():

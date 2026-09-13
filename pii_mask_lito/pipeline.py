@@ -742,7 +742,8 @@ _NOT_PROPAGATED = {"DATE", "AGE", "LOCATION", "FACE", "SIGNATURE"}
 _TRUSTED_ON_RERENDER = {"pattern", "spatial", "date", "barcode"}
 
 
-def _readback_data(path: str, engine) -> tuple[str, list[TokenText]]:
+def _readback_data(path: str, engine,
+                   symbol_leaks: list[str] | None = None) -> tuple[str, list[TokenText]]:
     """Everything legible in the written file.
 
     For a PDF this is the crux, and it is why an OCR engine is threaded all the
@@ -773,6 +774,11 @@ def _readback_data(path: str, engine) -> tuple[str, list[TokenText]]:
     if suffix in PDF_SUFFIXES:
         def append_batch(page_batch, number_batch) -> None:
             try:
+                if symbol_leaks is not None:
+                    for rendered, page_number in zip(page_batch, number_batch):
+                        symbol_leaks.extend(
+                            _identifier_symbols(rendered, page_number)
+                        )
                 for tokens in read_pages(engine, page_batch, number_batch):
                     assign_lines(tokens)
                     page = TokenText(reading_order(tokens))
@@ -827,8 +833,12 @@ def _verify(path: str, report: Report, engine=None) -> tuple[list[str], list[str
     suffix = Path(path).suffix.lower()
     if suffix in IMAGE_SUFFIXES and engine is None:
         return [], [], ["image output not verified: no OCR engine"]
+    combined_symbols = (
+        [] if suffix in PDF_SUFFIXES and engine is not None and symbols.available()
+        else None
+    )
     try:
-        raw, pattern_pages = _readback_data(path, engine)
+        raw, pattern_pages = _readback_data(path, engine, combined_symbols)
     except Exception:
         # An unreadable output cannot be shown to be clean, so treat it as dirty.
         return ["<output unreadable>"], [], []
@@ -867,7 +877,9 @@ def _verify(path: str, report: Report, engine=None) -> tuple[list[str], list[str
         page_patterns, page_flags = _verify_patterns(page)
         patterns.extend(page_patterns)
         flagged.extend(page_flags)
-    patterns += _verify_symbols(path)
+    patterns += (
+        combined_symbols if combined_symbols is not None else _verify_symbols(path)
+    )
     return sorted(set(leaked)), sorted(set(patterns)), flagged + sorted(set(flagged_names))
 
 
@@ -883,12 +895,19 @@ def _verify_symbols(path: str) -> list[str]:
     leaked = []
     for index, image in enumerate(pdf.iter_page_images(path)):
         try:
-            for token in symbols.decode(image, page=index):
-                if symbols.payload_is_identifier(token.text):
-                    leaked.append(f"decodable symbol on page {index + 1}")
+            leaked.extend(_identifier_symbols(image, index))
         finally:
             image.close()
     return leaked
+
+
+def _identifier_symbols(image, page: int) -> list[str]:
+    """Value-free verification failures for identifier-bearing symbols."""
+    return [
+        f"decodable symbol on page {page + 1}"
+        for token in symbols.decode(image, page=page)
+        if symbols.payload_is_identifier(token.text)
+    ]
 
 
 def _audit_output(path: str, semantic, report: Report) -> None:

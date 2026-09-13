@@ -39,6 +39,8 @@ _FACE_SCORE = 0.7
 # Below this fraction of a page's width a "face" is noise in a logo or a form
 # rule, not a photograph.
 _MIN_FACE = 0.02
+_YUNET_CACHE: tuple[str, object] | None = None
+_HAAR_CACHE: tuple[str, object] | None = None
 
 # Ink coverage above which a region with no readable words in it is treated as
 # handwriting rather than as blank paper. Printed text sits far higher than
@@ -112,6 +114,33 @@ def _weights() -> str:
     return str(Path(__file__).resolve().parent / "data" / _YUNET)
 
 
+def _yunet_detector(cv2, size: tuple[int, int]):
+    """Reuse YuNet model state while updating its page-specific input size."""
+    global _YUNET_CACHE
+
+    weights = _weights()
+    if _YUNET_CACHE is not None and _YUNET_CACHE[0] == weights:
+        detector = _YUNET_CACHE[1]
+        try:
+            detector.setInputSize(size)
+            return detector
+        except Exception:  # noqa: BLE001 - recreate below
+            _YUNET_CACHE = None
+    detector = cv2.FaceDetectorYN.create(weights, "", size, _FACE_SCORE)
+    _YUNET_CACHE = (weights, detector)
+    return detector
+
+
+def _haar_detector(cv2):
+    """Load OpenCV's fallback cascade once per process."""
+    global _HAAR_CACHE
+
+    path = cv2.data.haarcascades + _CASCADE
+    if _HAAR_CACHE is None or _HAAR_CACHE[0] != path:
+        _HAAR_CACHE = (path, cv2.CascadeClassifier(path))
+    return _HAAR_CACHE[1]
+
+
 def faces(image: Image.Image) -> list[tuple[float, float, float, float]]:
     """Page-normalized boxes around every detected face.
 
@@ -127,9 +156,7 @@ def faces(image: Image.Image) -> list[tuple[float, float, float, float]]:
     width, height = image.size
     array = np.array(image.convert("RGB"))
     try:
-        detector = cv2.FaceDetectorYN.create(
-            _weights(), "", (width, height), _FACE_SCORE
-        )
+        detector = _yunet_detector(cv2, (width, height))
         # YuNet takes BGR, like the rest of OpenCV.
         _retval, found = detector.detect(array[:, :, ::-1])
         boxes = [] if found is None else [row[:4] for row in found]
@@ -141,7 +168,7 @@ def faces(image: Image.Image) -> list[tuple[float, float, float, float]]:
         # small faces, so only the fallback uses the size floor.
     except Exception:  # noqa: BLE001
         # Missing weights, or an OpenCV too old for FaceDetectorYN.
-        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + _CASCADE)
+        cascade = _haar_detector(cv2)
         if cascade.empty():
             return []
         minimum = int(_MIN_FACE * width)
