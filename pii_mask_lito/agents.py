@@ -47,6 +47,8 @@ SEMANTIC_VETO_ENTITIES = {"PERSON", "LOCATION", "ORGANIZATION"}
 MODES = {"rules-only", "hybrid", "strict-union"}
 SEMANTIC_MAX_TOKENS = 300
 SEMANTIC_MAX_CANDIDATES = 80
+SEMANTIC_LISTING_CHAR_BUDGET = 18_000
+SEMANTIC_CANDIDATE_CHAR_BUDGET = 12_000
 _DOC_TYPES = (
     "identity document", "medical record", "order form", "application",
     "invoice", "correspondence", "spreadsheet", "report", "form",
@@ -608,20 +610,41 @@ class SemanticPageAnalyzer:
             locked_candidates: set[int] | None = None,
             discover_fields: bool = True) -> dict:
         locked_candidates = locked_candidates or set()
-        useful = [(i, token.text) for i, token in enumerate(tt.tokens)
-                  if len(token.text.strip()) > 1]
-        token_listing = "\n".join(
-            f"{index}: {json.dumps(str(value)[:80], ensure_ascii=True)}"
-            for index, value in useful[:SEMANTIC_MAX_TOKENS]
+        candidate_lines = []
+        candidate_chars = 0
+        for index, span in enumerate(candidates[:SEMANTIC_MAX_CANDIDATES]):
+            line = (
+                f"{index}: entity={span.entity} source={span.source} "
+                f"locked={str(index in locked_candidates or _unvetoable(span)).lower()} "
+                f"tokens={span.tokens[:12]} "
+                f"value={json.dumps(str(span.text)[:80], ensure_ascii=True)} "
+                f"context={json.dumps(_candidate_context(tt, span), ensure_ascii=True)}"
+            )
+            if candidate_lines and (
+                candidate_chars + len(line) + 1 > SEMANTIC_CANDIDATE_CHAR_BUDGET
+            ):
+                break
+            candidate_lines.append(line)
+            candidate_chars += len(line) + 1
+        candidate_limit = len(candidate_lines)
+        candidate_listing = "\n".join(candidate_lines) or "<none>"
+
+        token_budget = max(
+            2_000, SEMANTIC_LISTING_CHAR_BUDGET - candidate_chars
         )
-        candidate_listing = "\n".join(
-            f"{index}: entity={span.entity} source={span.source} "
-            f"locked={str(index in locked_candidates or _unvetoable(span)).lower()} "
-            f"tokens={span.tokens[:12]} "
-            f"value={json.dumps(str(span.text)[:120], ensure_ascii=True)} "
-            f"context={json.dumps(_candidate_context(tt, span), ensure_ascii=True)}"
-            for index, span in enumerate(candidates[:SEMANTIC_MAX_CANDIDATES])
-        ) or "<none>"
+        token_lines = []
+        token_chars = 0
+        for index, token in enumerate(tt.tokens):
+            if len(token.text.strip()) <= 1:
+                continue
+            line = f"{index}: {json.dumps(str(token.text)[:80], ensure_ascii=True)}"
+            if token_lines and token_chars + len(line) + 1 > token_budget:
+                break
+            token_lines.append(line)
+            token_chars += len(line) + 1
+            if len(token_lines) >= SEMANTIC_MAX_TOKENS:
+                break
+        token_listing = "\n".join(token_lines)
         spatial = getattr(rules, "spatial", None)
         prompt = SEMANTIC_PAGE % {
             "mask_professionals": bool(getattr(rules, "mask_providers", True)),
@@ -659,7 +682,10 @@ class SemanticPageAnalyzer:
             if callable(structured) else self.model.ask(prompt, image)
         )
         if not isinstance(reply, dict):
-            return {"doc_type": "unknown", "fields": [], "keep_candidates": set()}
+            return {
+                "doc_type": "unknown", "fields": [], "keep_candidates": set(),
+                "presented_candidates": candidate_limit,
+            }
 
         keep_candidates = set()
 
@@ -667,9 +693,8 @@ class SemanticPageAnalyzer:
             if isinstance(candidate_id, str) and candidate_id.strip().isdigit():
                 candidate_id = int(candidate_id.strip())
             if (isinstance(candidate_id, int) and not isinstance(candidate_id, bool)
-                    and 0 <= candidate_id < min(
-                        len(candidates), SEMANTIC_MAX_CANDIDATES
-                    ) and candidate_id not in locked_candidates
+                    and 0 <= candidate_id < candidate_limit
+                    and candidate_id not in locked_candidates
                     and not _unvetoable(candidates[candidate_id])):
                 keep_candidates.add(candidate_id)
 
@@ -692,6 +717,7 @@ class SemanticPageAnalyzer:
             "doc_type": _safe_doc_type(reply.get("doc_type")),
             "fields": _coerce_fields(reply) if discover_fields else [],
             "keep_candidates": keep_candidates,
+            "presented_candidates": candidate_limit,
         }
 
 
@@ -1030,6 +1056,7 @@ class AgenticDetector:
                 "page": page_index + 1,
                 "doc_type": result["doc_type"],
                 "candidates": len(rule_spans),
+                "presented_candidates": result["presented_candidates"],
                 "kept_candidates": len(keep_candidates),
                 "fields": len(fields),
             }

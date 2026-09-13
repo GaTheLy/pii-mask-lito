@@ -71,6 +71,39 @@ def test_semantic_candidate_listing_includes_local_context():
     assert 'context="Order ID ORDER-8451 Customer Name Mira"' in model.prompt
 
 
+def test_semantic_prompt_budget_rejects_ids_that_were_not_presented():
+    class CapturingModel:
+        prompt = ""
+
+        def ask(self, prompt, _image=None):
+            self.prompt = prompt
+            return {
+                "doc_type": "form",
+                "keep_candidate_ids": [79],
+                "fields": [],
+            }
+
+    class Rules:
+        mask_providers = True
+        mask_organizations = False
+
+        class spatial:
+            min_masked_age = 0
+
+    tokens = [Token("ordinary" + str(index) + "x" * 70) for index in range(200)]
+    text = TokenText(tokens)
+    candidates = [
+        Span("PERSON", text.offsets[index][0], text.offsets[index][1], 0.6,
+             tokens[index].text, [index], "presidio")
+        for index in range(80)
+    ]
+    model = CapturingModel()
+    result = SemanticPageAnalyzer(model).run(None, text, candidates, Rules())
+    assert result["presented_candidates"] < 80
+    assert result["keep_candidates"] == set()
+    assert len(model.prompt) < 25_000
+
+
 def test_ollama_disables_thinking_and_bounds_structured_output(monkeypatch):
     sent = {}
 

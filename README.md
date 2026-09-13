@@ -171,7 +171,9 @@ value is locked so a semantic keep decision cannot override the safety retry.
 The local Ollama transport disables model thinking and requests only a compact
 list of candidate IDs to keep. A server-enforced JSON schema caps newly
 discovered fields at eight per page and prevents unbounded or malformed local
-responses. Per-page traces include value-free model load, prompt, and output
+responses. Dense pages are packed to a fixed prompt budget; rule candidates
+that cannot be presented remain masked. Per-page traces include value-free
+model load, prompt, and output
 timings when Ollama provides them. Model and hardware choice
 still dominate runtime; benchmark a representative synthetic workload before
 using an agent mode for long documents. The 7B model is the local default;
