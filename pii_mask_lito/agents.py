@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 
 from .detect import SpatialContextDetector, _TOKEN_EDGE
 from .model import Span, TokenText
+from .registry import normalize
 
 # Validated identifiers and non-textual detections stay deterministic in every
 # mode. Hybrid semantic decisions may veto softer NER/context candidates only.
@@ -114,6 +115,11 @@ _PERSON_OWNERS = {
     "subject", "employee", "customer", "applicant", "signer", "sender",
     "recipient", "professional",
 }
+
+
+def _span_signature(span: Span) -> tuple[str, str, tuple[int, ...]]:
+    """Stable candidate identity across a verification-triggered rebuild."""
+    return span.entity, normalize(span.text), tuple(span.tokens)
 
 
 def canonical_type(raw: str) -> str | None:
@@ -479,7 +485,8 @@ a candidate. Copy their printed value exactly. Never invent coordinates or token
 indices. Use action=mask only when the type is one of the listed identifying \
 types and the owner is a natural-person role. Use action=keep for an unknown, \
 organization-owned, or non-identifying field. Never relabel an unknown field as \
-an account number merely to mask it.
+an account number merely to mask it. Return at most 20 fields, prioritizing \
+high-confidence identifiers not present in the candidate list.
 
 Reply with JSON only:
 {"doc_type":"<short type>",
@@ -730,6 +737,8 @@ class AgenticDetector:
         self.trace = Trace()
         self.page = 0
         self.keep_regions: dict[int, list[tuple[float, float, float, float]]] = {}
+        self.locked_values: set[str] = set()
+        self._semantic_cache: dict[int, dict] = {}
         self.verbose = verbose
 
     def begin_document(self) -> None:
@@ -737,6 +746,32 @@ class AgenticDetector:
         self.trace = Trace()
         self.page = 0
         self.keep_regions.clear()
+        self.locked_values.clear()
+        self._semantic_cache.clear()
+
+    def begin_pass(self) -> None:
+        """Reset page-local geometry before a deterministic PDF rebuild."""
+        self.page = 0
+        self.keep_regions.clear()
+
+    def end_document(self) -> None:
+        """Discard value-bearing semantic state while preserving safe traces."""
+        self.page = 0
+        self.keep_regions.clear()
+        self.locked_values.clear()
+        self._semantic_cache.clear()
+
+    def lock_values(self, values) -> None:
+        """Prevent final-verification discoveries from being semantically kept."""
+        for value in values:
+            key = normalize(value)
+            if key:
+                self.locked_values.add(key)
+
+    def _is_locked(self, span: Span) -> bool:
+        return _unvetoable(span) or normalize(span.text) in getattr(
+            self, "locked_values", set()
+        )
 
     def _note(self, message: str, since: float) -> None:
         if self.verbose:
@@ -746,53 +781,101 @@ class AgenticDetector:
         rule_spans = self.rules.detect(tt)
         if image is None or self.mode == "rules-only":
             return rule_spans
+        page_index = self.page
+        self.page += 1
+        cached = self._semantic_cache.get(page_index)
+        if cached is not None:
+            if cached.get("failed"):
+                self.trace.add(
+                    "semantic_reuse", 0.0,
+                    {
+                        "page": page_index + 1,
+                        "failed": cached["failed"],
+                        "fallback": "rules-only",
+                    },
+                )
+                return rule_spans
+            return self._agent_pass(image, tt, rule_spans, page_index, cached)
+        started = time.time()
         try:
-            return self._agent_pass(image, tt, rule_spans)
+            return self._agent_pass(image, tt, rule_spans, page_index)
         except Exception as exc:  # noqa: BLE001
             # A malformed response or unavailable host falls back to the full
             # rule result, so semantic assistance cannot make the run crash or
             # silently drop candidates.
+            self._semantic_cache[page_index] = {"failed": type(exc).__name__}
+            self._note(
+                f"page {page_index + 1}: semantic {type(exc).__name__}; "
+                "using rules-only fallback",
+                started,
+            )
             self.trace.add(
                 self.semantic.name,
-                0.0,
+                time.time() - started,
                 {
-                    "page": self.page,
+                    "page": page_index + 1,
                     "failed": type(exc).__name__,
                     "fallback": "rules-only",
                 },
             )
             return rule_spans
 
-    def _agent_pass(self, image, tt: TokenText, rule_spans: list[Span]) -> list[Span]:
-        self.page += 1
+    def _agent_pass(self, image, tt: TokenText, rule_spans: list[Span],
+                    page_index: int, cached: dict | None = None) -> list[Span]:
         t0 = time.time()
-        result = self.semantic.run(image, tt, rule_spans, self.rules)
-        fields = result["fields"]
-        keep_candidates = result["keep_candidates"]
+        if cached is None:
+            result = self.semantic.run(image, tt, rule_spans, self.rules)
+            fields = result["fields"]
+            keep_candidates = result["keep_candidates"]
+            self._semantic_cache[page_index] = {
+                "doc_type": result["doc_type"],
+                "fields": fields,
+                "keep_signatures": {
+                    _span_signature(rule_spans[index]) for index in keep_candidates
+                },
+            }
+        else:
+            fields = cached["fields"]
+            keep_signatures = cached["keep_signatures"]
+            keep_candidates = {
+                index for index, span in enumerate(rule_spans)
+                if _span_signature(span) in keep_signatures
+            }
+            result = {"doc_type": cached["doc_type"]}
         masked = [f for f in fields if f.decision == "mask"]
         self._note(
-            f"page {self.page}: {result['doc_type'][:32]}, "
+            f"page {page_index + 1}: {result['doc_type'][:32]}, "
             f"keep {len(keep_candidates)} candidates, add {len(masked)} fields",
             t0,
         )
-        detail = {
-            "page": self.page,
-            "doc_type": result["doc_type"],
-            "candidates": len(rule_spans),
-            "kept_candidates": len(keep_candidates),
-            "fields": len(fields),
-        }
-        metrics = getattr(self.model, "last_metrics", None)
-        if isinstance(metrics, dict):
-            detail.update(metrics)
-        self.trace.add(self.semantic.name, time.time() - t0, detail)
+        if cached is None:
+            detail = {
+                "page": page_index + 1,
+                "doc_type": result["doc_type"],
+                "candidates": len(rule_spans),
+                "kept_candidates": len(keep_candidates),
+                "fields": len(fields),
+            }
+            metrics = getattr(self.model, "last_metrics", None)
+            if isinstance(metrics, dict):
+                detail.update(metrics)
+            self.trace.add(self.semantic.name, time.time() - t0, detail)
+        else:
+            self.trace.add(
+                "semantic_reuse", time.time() - t0,
+                {
+                    "page": page_index + 1,
+                    "candidates": len(rule_spans),
+                    "kept_candidates": len(keep_candidates),
+                },
+            )
 
         t0 = time.time()
         agent_spans, keep_tokens = self._ground(tt, fields)
         explicit_keep_tokens = set(keep_tokens)
         for candidate_id in keep_candidates:
             explicit_keep_tokens.update(rule_spans[candidate_id].tokens)
-        self.keep_regions[self.page - 1] = [
+        self.keep_regions[page_index] = [
             tt.tokens[index].bbox
             for index in sorted(explicit_keep_tokens)
             if 0 <= index < len(tt.tokens) and tt.tokens[index].bbox is not None
@@ -815,7 +898,7 @@ class AgenticDetector:
         kept = self.keep_regions[page]
         out = []
         for span in spans:
-            if _unvetoable(span):
+            if self._is_locked(span):
                 out.append(span)
                 continue
             rects = [box for _page, box in tt.rects_for(span)]
@@ -877,7 +960,7 @@ class AgenticDetector:
             rule_spans = [
                 span
                 for index, span in enumerate(rule_spans)
-                if index not in keep_candidates or _unvetoable(span)
+                if index not in keep_candidates or self._is_locked(span)
             ]
         return merge_spans(rule_spans + agent_spans)
 

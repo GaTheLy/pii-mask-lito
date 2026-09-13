@@ -193,9 +193,13 @@ def mask(
             # detector ever saw the token, and no amount of recheck could.
             # Seeding the lexicon makes the finished document the last word.
             if report.leaked_patterns and suffix in PDF_SUFFIXES and not report.leaked:
+                if vlm is not None and hasattr(vlm, "lock_values"):
+                    vlm.lock_values(report.leaked_patterns)
                 for value in report.leaked_patterns:
                     detector.lexicon.setdefault(normalize(value), _pattern_entity(value))
                 report.findings.clear()
+                if vlm is not None and hasattr(vlm, "begin_pass"):
+                    vlm.begin_pass()
                 _mask_pdf(src, tmp.name, detector, registry, report, engine, dpi, vlm,
                           loop=_loop_engine(engine, ocr_engine, loop_ocr, report),
                           mask_unread_ink=mask_unread_ink)
@@ -242,6 +246,8 @@ def mask(
     finally:
         if os.path.exists(tmp.name):
             os.unlink(tmp.name)
+        if vlm is not None and hasattr(vlm, "end_document"):
+            vlm.end_document()
     return report
 
 

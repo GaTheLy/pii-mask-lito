@@ -157,6 +157,11 @@ back to the complete rule result for that page. The CLI reports how many
 semantic pages succeeded and adds a review warning whenever a page falls back,
 so a rules-only result cannot be mistaken for a successful hybrid run.
 
+If final verification discovers a new identifier shape and rebuilds a PDF, the
+pipeline reuses the first pass's semantic decisions instead of calling the
+model again. Physical page numbering restarts at one, and the newly verified
+value is locked so a semantic keep decision cannot override the safety retry.
+
 The local Ollama transport disables model thinking and requests only a compact
 list of candidate IDs to keep. Per-page traces include value-free model load,
 prompt, and output timings when Ollama provides them. Model and hardware choice

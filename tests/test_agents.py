@@ -220,13 +220,62 @@ def test_begin_document_clears_page_local_state():
     )
     detector.page = 4
     detector.keep_regions = {0: [(0.1, 0.1, 0.2, 0.2)]}
+    detector.locked_values = {"category"}
+    detector._semantic_cache = {0: {"doc_type": "form"}}
     detector.trace.add("semantic_page", 0.1, {"fields": 1})
 
     detector.begin_document()
 
     assert detector.page == 0
     assert detector.keep_regions == {}
+    assert detector.locked_values == set()
+    assert detector._semantic_cache == {}
     assert detector.trace.steps == []
+
+    detector.page = 2
+    detector.keep_regions = {0: [(0.1, 0.1, 0.2, 0.2)]}
+    detector.locked_values = {"category"}
+    detector._semantic_cache = {0: {"fields": [Field(label="Name", value="Mira")]}}
+    detector.trace.add("semantic_page", 0.1, {"fields": 1})
+    detector.end_document()
+    assert detector.page == 0
+    assert detector.keep_regions == {}
+    assert detector.locked_values == set()
+    assert detector._semantic_cache == {}
+    assert len(detector.trace.steps) == 1
+
+
+def test_second_pass_reuses_semantics_with_physical_page_numbers():
+    model = _FakeSemanticModel()
+    detector = AgenticDetector(
+        _FakeRules(), model=model, verbose=False, mode="hybrid"
+    )
+    text = TokenText.from_text("Category REF-5509-ZINC")
+    first = detector.detect(object(), text)
+
+    detector.begin_pass()
+    second = detector.detect(object(), text)
+
+    assert model.calls == 1
+    assert [(span.entity, span.text) for span in second] == [
+        (span.entity, span.text) for span in first
+    ]
+    assert detector.page == 1
+    assert detector.trace.steps[-2]["agent"] == "semantic_reuse"
+    assert detector.trace.steps[-2]["page"] == 1
+
+
+def test_verification_locked_value_cannot_be_kept_or_filtered_later():
+    tt = TokenText([Token("Category", 0, (0.1, 0.2, 0.2, 0.23), 0)])
+    span = Span("PERSON", 0, 8, 0.7, "Category", [0], "propagated")
+    detector = AgenticDetector.__new__(AgenticDetector)
+    detector.mode = "hybrid"
+    detector.keep_regions = {0: [(0.1, 0.2, 0.2, 0.23)]}
+    detector.locked_values = set()
+    detector.lock_values(["Category"])
+
+    assert detector.filter_late_spans(0, tt, [span]) == [span]
+    assert detector._reconcile([span], [], set(), {0}) == [span]
 
 
 def test_unknown_agent_mode_is_rejected():

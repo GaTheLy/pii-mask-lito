@@ -656,6 +656,56 @@ def test_semantic_page_failure_is_an_explicit_review_warning(tmp_path):
     assert report.trace[0]["fallback"] == "rules-only"
 
 
+def test_gate2_rebuild_resets_semantic_pass_and_locks_new_values(
+        tmp_path, monkeypatch):
+    import pii_mask_lito.pipeline as pipeline_module
+    from pii_mask_lito.agents import Trace
+    from pii_mask_lito.pipeline import mask as mask_file
+
+    source = tmp_path / "input.pdf"
+    output = tmp_path / "output.pdf"
+    source.write_bytes(b"synthetic placeholder")
+
+    class FakeDetector:
+        lexicon = {}
+        suppressed = []
+
+    class FakeSemantic:
+        auditor = None
+        trace = Trace()
+        began = 0
+        restarted = 0
+        locked = []
+
+        def begin_document(self):
+            self.began += 1
+
+        def begin_pass(self):
+            self.restarted += 1
+
+        def lock_values(self, values):
+            self.locked.extend(values)
+
+    verification = iter([
+        ([], ["123456789"], []),
+        ([], [], []),
+    ])
+    monkeypatch.setattr(pipeline_module, "_ocr_or_none", lambda *_args: object())
+    monkeypatch.setattr(pipeline_module, "_loop_engine", lambda *args: args[0])
+    monkeypatch.setattr(pipeline_module, "_mask_pdf", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline_module, "_verify", lambda *_args: next(verification))
+
+    semantic = FakeSemantic()
+    report = mask_file(
+        str(source), str(output), detector=FakeDetector(), verify=True,
+        vlm=semantic,
+    )
+    assert report.verified
+    assert semantic.began == 1
+    assert semantic.restarted == 1
+    assert semantic.locked == ["123456789"]
+
+
 def test_a_small_image_panel_is_still_read():
     """Every raster panel is eligible for OCR, regardless of page coverage."""
     from PIL import Image, ImageDraw
