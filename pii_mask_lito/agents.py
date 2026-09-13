@@ -214,7 +214,7 @@ class Ollama:
 
     def __init__(
         self,
-        model: str = "gemma4:31b",
+        model: str = "qwen2.5vl:7b",
         host: str = "http://localhost:11434",
         timeout: int = 180,
         num_ctx: int = 8192,
@@ -882,7 +882,7 @@ class AgenticDetector:
         return merge_spans(rule_spans + agent_spans)
 
 
-def build(rules, model_name: str = "gemma4:31b", host: str = "http://localhost:11434",
+def build(rules, model_name: str = "qwen2.5vl:7b", host: str = "http://localhost:11434",
           audit: bool = False, verbose: bool = True,
           mode: str = "hybrid") -> AgenticDetector:
     return AgenticDetector(rules, transport(model_name, host=host), audit=audit,

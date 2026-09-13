@@ -142,6 +142,9 @@ Decision modes are explicit:
 - `strict-union` preserves every rule mask and lets the model add masks only.
 
 ```bash
+# Install the recommended local model once
+ollama pull qwen2.5vl:7b
+
 # One local semantic request per page; soft false positives may be kept
 pii-mask-lito input.pdf -o output.pdf --agents qwen2.5vl:7b --mode hybrid
 
@@ -158,7 +161,8 @@ The local Ollama transport disables model thinking and requests only a compact
 list of candidate IDs to keep. Per-page traces include value-free model load,
 prompt, and output timings when Ollama provides them. Model and hardware choice
 still dominate runtime; benchmark a representative synthetic workload before
-using an agent mode for long documents.
+using an agent mode for long documents. The 7B model is the local default;
+smaller models can be faster but must not be assumed to preserve masking recall.
 
 `--audit` adds a separate semantic pass over finished page pixels; its findings
 are review flags rather than automatic masks or verification failures.

@@ -123,7 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agents",
         nargs="?",
-        const="gemma4:31b",
+        const="qwen2.5vl:7b",
         metavar="MODEL",
         help="use one VLM semantic decision pass per PDF/image page, then "
              "ground all masks deterministically. MODEL picks the host as well "

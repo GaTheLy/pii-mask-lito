@@ -480,7 +480,10 @@ def test_cli_confidence_score_is_bounded():
 
 
 def test_cli_agent_modes_are_explicit(tmp_path, capsys):
-    from pii_mask_lito.cli import main as cli_main
+    from pii_mask_lito.cli import build_parser, main as cli_main
+
+    args = build_parser().parse_args(["input.pdf", "-o", "output.pdf", "--agents"])
+    assert args.agents == "qwen2.5vl:7b"
 
     output = tmp_path / "masked.txt"
     assert cli_main([
