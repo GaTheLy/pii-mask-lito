@@ -366,7 +366,7 @@ def _vision_boxes(image, tokens, entities, report, page: int,
         if page == 0 and (entities & {"FACE", "SIGNATURE"}):
             report.review.append(
                 "opencv not installed: faces and signature blocks were not "
-                "looked for (Safe Harbor #17)"
+                "looked for; visual identifiers require manual review"
             )
         return []
     found = []
@@ -499,10 +499,7 @@ def _mask_pdf_images(src, dest, detector, registry, report, engine, dpi, vlm,
     # A gate-2 rebuild starts from the original render, so it must run the
     # convergence loop again or masks discovered during recheck would be lost.
     if engine is not None and recheck:
-        active_pages = {
-            index for index, source in enumerate(provenance)
-            if source["full_ocr"] or source["ocr_supplements"]
-        }
+        active_pages = _active_recheck_pages(provenance, page_boxes)
         if active_pages:
             _recheck(loop or engine, detector, registry, report,
                      masked_images, text_layers, page_boxes,
@@ -510,6 +507,15 @@ def _mask_pdf_images(src, dest, detector, registry, report, engine, dpi, vlm,
                      semantic=vlm)
 
     pdf.write(src, dest, masked_images, text_layers, dpi)
+
+
+def _active_recheck_pages(provenance, page_boxes) -> set[int]:
+    """OCR-backed pages whose pixels actually changed during masking."""
+    return {
+        index for index, source in enumerate(provenance)
+        if (source["full_ocr"] or source["ocr_supplements"])
+        and bool(page_boxes.get(index))
+    }
 
 
 def _already_masked(tt, span, boxes, threshold: float = 0.5) -> bool:

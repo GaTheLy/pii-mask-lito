@@ -405,7 +405,36 @@ def test_general_and_hipaa_profiles_are_distinct():
     hipaa = Detector(profile="hipaa-safe-harbor")
     assert general.mask_providers is True and general.spatial.min_masked_age == 0
     assert hipaa.mask_providers is False and hipaa.spatial.min_masked_age == 90
-    assert "GENERIC_ID" in general.entities and "GENERIC_ID" not in hipaa.entities
+    assert "GENERIC_ID" in general.entities and "GENERIC_ID" in hipaa.entities
+
+
+def test_professional_name_exception_does_not_suppress_other_identifiers():
+    provider_name = Detector(profile="hipaa-safe-harbor").detect(
+        TokenText.from_text("Physician Dorian Vale")
+    )
+    assert not any(span.entity == "PERSON" for span in provider_name)
+
+    for label in ("Payee", "Provider", "Physician"):
+        spans = Detector(profile="hipaa-safe-harbor").detect(
+            TokenText.from_text(f"{label} 202-555-0147")
+        )
+        assert any(span.entity == "PHONE_NUMBER" for span in spans), label
+
+
+def test_ambiguous_business_ids_are_generic_not_health_plan_ids():
+    for label, value in (
+        ("Member ID", "CLUB-4827"),
+        ("Policy number", "POL-9136"),
+        ("Certificate", "CERT-7305"),
+        ("Group number", "GRP-2048"),
+    ):
+        spans = Detector().detect(TokenText.from_text(f"{label} {value}"))
+        assert any(
+            span.entity == "GENERIC_ID" and span.text == value for span in spans
+        ), label
+
+    health = Detector().detect(TokenText.from_text("Health plan ID PLAN-5509"))
+    assert any(span.entity == "HEALTH_PLAN_ID" for span in health)
 
 
 def test_explicit_empty_configuration_stays_empty():
@@ -439,6 +468,27 @@ def test_cross_page_propagation_masks_known_values():
 def test_numeric_ocr_confusion_folding_is_bounded():
     assert _fold("73186o104") == "731860104"
     assert _fold("total") is None
+
+
+def test_fuzzy_propagation_runs_only_for_ocr_tokens():
+    detector = Detector(entities=["PERSON", "GENERIC_ID"])
+    detector.lexicon = {"calderon": "PERSON", "731860104": "GENERIC_ID"}
+    detector.numeric_index = {"731860104": "GENERIC_ID"}
+
+    native = TokenText([
+        Token("Calderqn", confidence=1.0),
+        Token("73186O104", confidence=1.0),
+    ])
+    assert detector.propagate(native) == []
+
+    ocr_text = TokenText([
+        Token("Calderqn", confidence=0.91),
+        Token("73186O104", confidence=0.91),
+    ])
+    assert {(span.entity, span.text) for span in detector.propagate(ocr_text)} == {
+        ("PERSON", "Calderqn"),
+        ("GENERIC_ID", "73186O104"),
+    }
 
 
 def test_wide_identifier_is_not_silently_dropped():

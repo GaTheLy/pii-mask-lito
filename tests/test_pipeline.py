@@ -126,7 +126,7 @@ def test_merge_spans_collapses_overlaps():
     spans = [
         Span("US_SSN", 10, 21, 0.85, "000-00-0000"),
         Span("PHONE_NUMBER", 10, 21, 0.40, "000-00-0000"),
-        Span("EMAIL_ADDRESS", 30, 50, 0.99, "a@b.com"),
+        Span("EMAIL_ADDRESS", 30, 44, 0.99, "a@example.test"),
     ]
     kept = merge_spans(spans)
     assert len(kept) == 2
@@ -338,7 +338,7 @@ def test_typed_electronic_signature_text_is_not_a_signature_region():
 
 
 def test_yunet_weights_ship_and_haar_still_covers_for_them():
-    """Safe Harbor #17 has no room for "we could not check".
+    """Visual-identifier coverage has no room for "we could not check".
 
     Both halves matter. The weights must actually be in the package -- a
     detector that silently fails to load reports every page face-free -- and the
@@ -810,6 +810,24 @@ def test_read_pages_keeps_the_real_page_number_on_a_subset():
         raise AssertionError("mismatched lengths should not be silently zipped")
     except ValueError:
         pass
+
+
+def test_recheck_starts_only_on_ocr_pages_whose_pixels_changed():
+    from pii_mask_lito.pipeline import _active_recheck_pages
+
+    provenance = [
+        {"full_ocr": True, "ocr_supplements": 0},
+        {"full_ocr": True, "ocr_supplements": 0},
+        {"full_ocr": False, "ocr_supplements": 2},
+        {"full_ocr": False, "ocr_supplements": 0},
+    ]
+    page_boxes = {
+        0: [],
+        1: [((0.1, 0.1, 0.2, 0.2), "<NAME#0>")],
+        2: [],
+        3: [((0.1, 0.1, 0.2, 0.2), "<NAME#1>")],
+    }
+    assert _active_recheck_pages(provenance, page_boxes) == {1}
 
 
 def main():

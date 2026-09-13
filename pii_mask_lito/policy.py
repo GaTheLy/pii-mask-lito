@@ -49,6 +49,7 @@ GENERAL_PII = PATTERN_ENTITIES + CONTEXTUAL_ENTITIES
 # explicit policy decision; it is no longer the package default.
 SAFE_HARBOR = [
     *PATTERN_ENTITIES,
+    "GENERIC_ID",
     "MEDICAL_RECORD_NUMBER",
     "ACCOUNT_NUMBER",
     "HEALTH_PLAN_ID",

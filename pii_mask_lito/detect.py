@@ -30,7 +30,9 @@ LABELS: dict[str, tuple[str, ...]] = {
         "unique id", "identifier", "employee id", "customer id", "client id",
         "user id", "record id", "case id", "reference id", "document id",
         "order id", "transaction id", "ticket id", "asset id",
-        "hospital id", "doctor id", "form", "form id", "form number",
+        "hospital id", "doctor id", "provider id", "professional id", "npi",
+        "member id", "policy id", "policy number", "group id", "group number",
+        "certificate", "form", "form id", "form number",
     ),
     "MEDICAL_RECORD_NUMBER": (
         "mrn",
@@ -48,17 +50,11 @@ LABELS: dict[str, tuple[str, ...]] = {
     ),
     "HEALTH_PLAN_ID": (
         "health plan id",
-        "member id",
         "insured's unique id",
         "insureds unique id",
         "subscriber id",
         "subscriber number",
-        "policy id",
-        "policy number",
-        "group id",
-        "group number",
         "patient id",
-        "certificate",
     ),
     "CLAIM_NUMBER": ("claim number", "claim no", "claim #", "claim id"),
     "CREDIT_CARD": ("credit card", "card number", "card no", "card", "cc"),
@@ -72,11 +68,6 @@ PERSON_LABELS = (
     "name", "full name", "customer", "customer name", "employee name", "contact name",
     "recipient name", "applicant name", "account holder", "patient name",
 )
-
-# The key PROVIDER_LABELS competes under in _nearest_label. Not an entity: a win
-# here means suppress, not mask. Deliberately not a string that could ever be a
-# real entity name, so a mix-up is a KeyError rather than a silent mask.
-_PROVIDER = object()
 
 # Optional structural organization detection complements general NER when OCR
 # preserves capitalization but not sentence context.
@@ -327,18 +318,10 @@ class SpatialContextDetector:
             # label is not a page-wide veto, and a distant identifier label is
             # not evidence for the value in another field. Weighting the whole
             # context window equally creates both under- and over-masking.
-            groups = dict(LABELS)
-            if not self.mask_providers:
-                groups[_PROVIDER] = PROVIDER_LABELS
-            match = _nearest_label(context, dists, groups)
+            match = _nearest_label(context, dists, LABELS)
             if match is None:
                 continue
             entity, _distance = match
-            if entity is _PROVIDER:
-                # Remember the explicit role classification so recheck passes
-                # apply the same policy even if OCR loses the label.
-                self.provider_names.add(normalize(clean))
-                continue
             start = tt.offsets[i][0] + offset
             spans.append(
                 Span(
@@ -515,8 +498,7 @@ PROVIDER_LABELS = (
 
 # Entity types eligible for the explicit professional-identity exception.
 _PROVIDER_SUPPRESSIBLE = {
-    "PERSON", "PHONE_NUMBER", "US_BANK_NUMBER", "US_ITIN", "US_PASSPORT",
-    "MEDICAL_LICENSE", "US_DRIVER_LICENSE", "IBAN_CODE",
+    "PERSON",
 }
 
 # Tokens of a span whose surroundings are checked for a label. Bounded because
@@ -1086,10 +1068,7 @@ class Detector:
         if self.mask_providers or not self.provider_names:
             return False
         if span.entity != "PERSON":
-            # Identifiers are settled whole: an NPI is the provider's or it is
-            # not, and there are no parts to weigh.
-            key = normalize(_OCR_NOISE.sub("", span.text))
-            return key in self.provider_names and key not in self.patient_names
+            return False
         words = {normalize(w) for w in re.findall(r"[A-Za-z][A-Za-z'\-]+", span.text)}
         if words & self.patient_names:
             return False
@@ -1416,10 +1395,13 @@ def propagate(detector: "Detector", tt: TokenText) -> list[Span]:
         stripped = token.text.strip(_TOKEN_EDGE)
         key = normalize(stripped)
         entity = detector.lexicon.get(key)
-        if entity is None and key not in _TOO_COMMON:
+        if (entity is None and key not in _TOO_COMMON
+                and token.confidence < 1.0):
             # Exact miss. Try the OCR confusion classes before the letter-level
             # fuzzy match: a damaged MRN is numeric, and _fuzzy_entity only ever
-            # considers PERSON entries.
+            # considers PERSON entries. Native text has exact characters and
+            # never needs either expensive approximation; limiting this branch
+            # to OCR tokens also prevents fuzzy false positives on text layers.
             # Folding preserves length, so a hit here is already a same-length
             # match -- no separate length test is needed.
             folded = _fold(key)
