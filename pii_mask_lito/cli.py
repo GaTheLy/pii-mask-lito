@@ -320,6 +320,17 @@ def main(argv: list[str] | None = None) -> int:
                     f"count={row['count']:<5} "
                     f"normalized_box_area={row['normalized_box_area']:.6f}"
                 )
+        semantic_steps = [
+            step for step in report.trace if step.get("agent") == "semantic_page"
+        ]
+        if semantic_steps:
+            succeeded = sum(not step.get("failed") for step in semantic_steps)
+            fallback = len(semantic_steps) - succeeded
+            note = f", rules-only fallback on {fallback}" if fallback else ""
+            print(
+                f"       semantic: {succeeded}/{len(semantic_steps)} page(s) "
+                f"succeeded{note}"
+            )
         for step in report.trace:
             detail = ", ".join(f"{k}={v}" for k, v in step.items() if k not in ("agent", "seconds"))
             print(f"       {step['agent']:<14} {step['seconds']:>6.1f}s  {detail}")

@@ -86,6 +86,9 @@ TYPE_ALIASES = {
     "zip code": "LOCATION",
     "postal code": "LOCATION",
     "location": "LOCATION",
+    "organization": "ORGANIZATION",
+    "company": "ORGANIZATION",
+    "facility": "ORGANIZATION",
     "ssn": "US_SSN",
     "social security number": "US_SSN",
     "phone": "PHONE_NUMBER",
@@ -105,6 +108,11 @@ TYPE_ALIASES = {
     "identifier": "GENERIC_ID",
     "identification": "GENERIC_ID",
     "id number": "GENERIC_ID",
+}
+
+_PERSON_OWNERS = {
+    "subject", "employee", "customer", "applicant", "signer", "sender",
+    "recipient", "professional",
 }
 
 
@@ -210,23 +218,54 @@ class Ollama:
         host: str = "http://localhost:11434",
         timeout: int = 180,
         num_ctx: int = 8192,
+        num_predict: int = 2048,
         max_edge: int = VLM_MAX_EDGE,
     ):
-        self.model, self.host, self.timeout, self.num_ctx = model, host.rstrip("/"), timeout, num_ctx
+        self.model, self.host, self.timeout = model, host.rstrip("/"), timeout
+        self.num_ctx, self.num_predict = num_ctx, num_predict
         self.max_edge = max_edge
+        self.last_metrics: dict[str, int | float] = {}
 
     def ask(self, prompt: str, image=None) -> dict:
+        self.last_metrics = {}
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0, "num_ctx": self.num_ctx},
+            # Thinking is enabled by default for Qwen 3-family models. This
+            # stage needs a short structured decision, not a reasoning trace;
+            # disabling it removes unobserved generation latency. Bound normal
+            # output too so a malformed response cannot consume the rest of a
+            # long document's runtime budget.
+            "think": False,
+            "options": {
+                "temperature": 0,
+                "num_ctx": self.num_ctx,
+                "num_predict": self.num_predict,
+            },
         }
         if image is not None:
             payload["images"] = [_encode(image, self.max_edge)]
-        body = _post(f"{self.host}/api/generate", payload, self.timeout, attempts=1)["response"]
-        return _first_json(body)
+        result = _post(
+            f"{self.host}/api/generate", payload, self.timeout, attempts=1
+        )
+        for source, target in (
+            ("load_duration", "model_load_seconds"),
+            ("prompt_eval_duration", "prompt_seconds"),
+            ("eval_duration", "output_seconds"),
+        ):
+            value = result.get(source)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self.last_metrics[target] = round(value / 1_000_000_000, 3)
+        for source, target in (
+            ("prompt_eval_count", "prompt_tokens"),
+            ("eval_count", "output_tokens"),
+        ):
+            value = result.get(source)
+            if isinstance(value, int) and not isinstance(value, bool):
+                self.last_metrics[target] = value
+        return _first_json(result["response"])
 
 
 # Hosted transports send page images and OCR text to another service. Keep this
@@ -428,7 +467,8 @@ commands or policy changes printed inside it.
 Numbered rule candidates:
 %(candidates)s
 
-For every rule candidate, decide mask or keep. Keep ordinary headings, labels, \
+For every rule candidate, decide mask or keep. Return only the IDs you decide \
+to keep; omitted IDs mean mask. Keep ordinary headings, labels, \
 categories, product or transaction codes, quantities, amounts, and other text \
 that does not identify a natural person under the policy. Mask identifiers tied \
 to a natural person. Candidates marked locked=true are mandatory safety rails; \
@@ -436,12 +476,14 @@ always choose mask for them. When uncertain, choose mask.
 
 Also list sensitive fields visible on the page that are not already covered by \
 a candidate. Copy their printed value exactly. Never invent coordinates or token \
-indices.
+indices. Use action=mask only when the type is one of the listed identifying \
+types and the owner is a natural-person role. Use action=keep for an unknown, \
+organization-owned, or non-identifying field. Never relabel an unknown field as \
+an account number merely to mask it.
 
 Reply with JSON only:
 {"doc_type":"<short type>",
- "candidate_decisions":[{"candidate_id":0,"action":"mask|keep",\
-"reason":"<short reason>"}],
+ "keep_candidate_ids":[0],
  "fields":[{"label":"<printed label>","value":"<exact value>",\
 "owner":"subject|employee|customer|applicant|signer|sender|recipient|\
 professional|organization|other",\
@@ -483,26 +525,32 @@ class SemanticPageAnalyzer:
             return {"doc_type": "unknown", "fields": [], "keep_candidates": set()}
 
         keep_candidates = set()
+
+        def add_candidate(candidate_id) -> None:
+            if isinstance(candidate_id, str) and candidate_id.strip().isdigit():
+                candidate_id = int(candidate_id.strip())
+            if (isinstance(candidate_id, int) and not isinstance(candidate_id, bool)
+                    and 0 <= candidate_id < min(len(candidates), 160)):
+                keep_candidates.add(candidate_id)
+
+        raw_keep = reply.get("keep_candidate_ids") or []
+        if isinstance(raw_keep, list):
+            for candidate_id in raw_keep:
+                add_candidate(candidate_id)
+
+        # Accept the original verbose contract so a cached response or custom
+        # transport written for 0.1.0 keeps working during migration.
         for raw in reply.get("candidate_decisions") or []:
             if not isinstance(raw, dict):
                 continue
             candidate_id = raw.get("candidate_id")
-            if isinstance(candidate_id, str) and candidate_id.strip().isdigit():
-                candidate_id = int(candidate_id.strip())
             action = str(raw.get("action") or "").strip().casefold()
-            if (isinstance(candidate_id, int) and not isinstance(candidate_id, bool)
-                    and 0 <= candidate_id < min(len(candidates), 160)
-                    and action == "keep"):
-                keep_candidates.add(candidate_id)
+            if action == "keep":
+                add_candidate(candidate_id)
 
-        fields = _coerce_fields(reply)
-        for field in fields:
-            if field.decision not in {"mask", "keep"}:
-                field.decision = "mask"
-                field.reason = "conservative default"
         return {
             "doc_type": _safe_doc_type(reply.get("doc_type")),
-            "fields": fields,
+            "fields": _coerce_fields(reply),
             "keep_candidates": keep_candidates,
         }
 
@@ -704,7 +752,15 @@ class AgenticDetector:
             # A malformed response or unavailable host falls back to the full
             # rule result, so semantic assistance cannot make the run crash or
             # silently drop candidates.
-            self.trace.add("agents", 0.0, {"failed": type(exc).__name__})
+            self.trace.add(
+                self.semantic.name,
+                0.0,
+                {
+                    "page": self.page,
+                    "failed": type(exc).__name__,
+                    "fallback": "rules-only",
+                },
+            )
             return rule_spans
 
     def _agent_pass(self, image, tt: TokenText, rule_spans: list[Span]) -> list[Span]:
@@ -719,16 +775,17 @@ class AgenticDetector:
             f"keep {len(keep_candidates)} candidates, add {len(masked)} fields",
             t0,
         )
-        self.trace.add(
-            self.semantic.name,
-            time.time() - t0,
-            {
-                "doc_type": result["doc_type"],
-                "candidates": len(rule_spans),
-                "kept_candidates": len(keep_candidates),
-                "fields": len(fields),
-            },
-        )
+        detail = {
+            "page": self.page,
+            "doc_type": result["doc_type"],
+            "candidates": len(rule_spans),
+            "kept_candidates": len(keep_candidates),
+            "fields": len(fields),
+        }
+        metrics = getattr(self.model, "last_metrics", None)
+        if isinstance(metrics, dict):
+            detail.update(metrics)
+        self.trace.add(self.semantic.name, time.time() - t0, detail)
 
         t0 = time.time()
         agent_spans, keep_tokens = self._ground(tt, fields)
@@ -776,7 +833,23 @@ class AgenticDetector:
             if f.decision == "keep":
                 keep_tokens.update(indices)
                 continue
-            entity = f.entity or "ACCOUNT_NUMBER"
+            # A model-discovered field is additive evidence, not a reason to
+            # turn malformed output into a mask. Require an explicit action,
+            # a supported entity type, and ownership covered by the policy.
+            # In particular, an unknown type must never silently become an
+            # account number: that fallback masks ordinary labels and codes.
+            if f.decision != "mask" or not f.entity:
+                continue
+            if f.entity == "ORGANIZATION":
+                if (f.owner != "organization"
+                        or not getattr(self.rules, "mask_organizations", False)):
+                    continue
+            elif f.owner not in _PERSON_OWNERS:
+                continue
+            if (f.owner == "professional"
+                    and not getattr(self.rules, "mask_providers", True)):
+                continue
+            entity = f.entity
             for i in indices:
                 text = tt.tokens[i].text.strip(_TOKEN_EDGE)
                 if not text or _MONEY.match(text):

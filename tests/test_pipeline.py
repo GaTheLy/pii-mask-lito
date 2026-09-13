@@ -619,6 +619,40 @@ def test_agent_audit_failure_requires_manual_review_but_does_not_crash(tmp_path)
     assert semantic.trace.steps[0]["failed"] == "RuntimeError"
 
 
+def test_semantic_page_failure_is_an_explicit_review_warning(tmp_path):
+    from pii_mask_lito.agents import Trace
+    from pii_mask_lito.pipeline import mask as mask_file
+    from pii_mask_lito.registry import TagRegistry
+
+    source = tmp_path / "plain.txt"
+    output = tmp_path / "masked.txt"
+    source.write_text("ordinary text", encoding="utf-8")
+
+    class NoopDetector:
+        def detect(self, _tt, hint=""):
+            return []
+
+    class FakeSemantic:
+        auditor = None
+
+        def begin_document(self):
+            self.trace = Trace()
+            self.trace.add("semantic_page", 0.0, {
+                "page": 1,
+                "failed": "TimeoutError",
+                "fallback": "rules-only",
+            })
+
+    report = mask_file(
+        str(source), str(output), detector=NoopDetector(),
+        registry=TagRegistry(), verify=False, vlm=FakeSemantic(),
+    )
+    assert report.review == [
+        "semantic assistance failed on 1 page(s); those pages used rules-only fallback"
+    ]
+    assert report.trace[0]["fallback"] == "rules-only"
+
+
 def test_a_small_image_panel_is_still_read():
     """Every raster panel is eligible for OCR, regardless of page coverage."""
     from PIL import Image, ImageDraw

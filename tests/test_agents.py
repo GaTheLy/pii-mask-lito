@@ -2,6 +2,8 @@
 
 import pytest
 
+import pii_mask_lito.agents as agents_module
+
 from pii_mask_lito.agents import (
     AgenticDetector,
     Field,
@@ -21,12 +23,42 @@ def test_canonical_type_maps_cross_domain_labels():
     assert canonical_type("employee id") == "GENERIC_ID"
     assert canonical_type("customer name") == "PERSON"
     assert canonical_type("postal code") == "LOCATION"
+    assert canonical_type("company") == "ORGANIZATION"
     assert canonical_type("unknown category") is None
 
 
 def test_first_json_ignores_model_wrapping():
     assert _first_json('Result follows: {"doc_type": "invoice"}\nDone.') == {
         "doc_type": "invoice"
+    }
+
+
+def test_ollama_disables_thinking_and_bounds_structured_output(monkeypatch):
+    sent = {}
+
+    def fake_post(_url, payload, _timeout, attempts):
+        sent.update(payload)
+        assert attempts == 1
+        return {
+            "response": '{"doc_type":"form"}',
+            "load_duration": 1_500_000_000,
+            "prompt_eval_duration": 2_250_000_000,
+            "eval_duration": 750_000_000,
+            "prompt_eval_count": 321,
+            "eval_count": 42,
+        }
+
+    monkeypatch.setattr(agents_module, "_post", fake_post)
+    model = Ollama(model="qwen3.5:latest", num_predict=900)
+    assert model.ask("decide") == {"doc_type": "form"}
+    assert sent["think"] is False
+    assert sent["options"]["num_predict"] == 900
+    assert model.last_metrics == {
+        "model_load_seconds": 1.5,
+        "prompt_seconds": 2.25,
+        "output_seconds": 0.75,
+        "prompt_tokens": 321,
+        "output_tokens": 42,
     }
 
 
@@ -132,9 +164,7 @@ class _FakeSemanticModel:
             raise RuntimeError("model unavailable")
         return {
             "doc_type": "order form",
-            "candidate_decisions": [
-                {"candidate_id": "0", "action": "keep", "reason": "heading"}
-            ],
+            "keep_candidate_ids": ["0"],
             "fields": [{
                 "label": "Reference ID",
                 "value": "REF-5509-ZINC",
@@ -175,6 +205,13 @@ def test_rules_only_never_calls_model_and_model_failure_keeps_rules():
     )
     assert hybrid.detect(object(), text)[0].text == "Category"
     assert failing_model.calls == 1
+    assert hybrid.trace.steps == [{
+        "agent": "semantic_page",
+        "seconds": 0.0,
+        "page": 1,
+        "failed": "RuntimeError",
+        "fallback": "rules-only",
+    }]
 
 
 def test_begin_document_clears_page_local_state():
@@ -200,11 +237,50 @@ def test_unknown_agent_mode_is_rejected():
 def test_grounding_never_masks_money():
     tt = TokenText.from_text("Amount $72.00")
     detector = AgenticDetector.__new__(AgenticDetector)
+    detector.rules = _FakeRules()
     spans, kept = detector._ground(
         tt,
-        [Field(label="Amount", value="$72.00", entity="GENERIC_ID", decision="mask")],
+        [Field(label="Amount", value="$72.00", owner="customer",
+               entity="GENERIC_ID", decision="mask")],
     )
     assert spans == [] and kept == set()
+
+
+def test_grounding_does_not_mask_ambiguous_or_non_person_model_fields():
+    tt = TokenText.from_text("Category Order ORD-5509-ZINC")
+    detector = AgenticDetector.__new__(AgenticDetector)
+    detector.rules = _FakeRules()
+    fields = [
+        Field(label="Category", value="Category", owner="customer",
+              decision="mask"),
+        Field(label="Order", value="Order", owner="customer", entity="PERSON"),
+        Field(label="Order ID", value="ORD-5509-ZINC", owner="organization",
+              entity="GENERIC_ID", decision="mask"),
+    ]
+    spans, kept = detector._ground(tt, fields)
+    assert spans == [] and kept == set()
+
+
+def test_grounding_honors_professional_and_organization_policy():
+    tt = TokenText.from_text("Mira Calder Example Company")
+    detector = AgenticDetector.__new__(AgenticDetector)
+    detector.rules = _FakeRules()
+    detector.rules.mask_providers = False
+    fields = [
+        Field(label="Professional", value="Mira Calder", owner="professional",
+              entity="PERSON", decision="mask"),
+        Field(label="Company", value="Example Company", owner="organization",
+              entity="ORGANIZATION", decision="mask"),
+    ]
+    spans, _ = detector._ground(tt, fields)
+    assert spans == []
+
+    detector.rules.mask_organizations = True
+    spans, _ = detector._ground(tt, fields)
+    assert [(span.entity, span.text) for span in spans] == [
+        ("ORGANIZATION", "Example"),
+        ("ORGANIZATION", "Company"),
+    ]
 
 
 def test_unknown_model_tag_defaults_to_local_transport():

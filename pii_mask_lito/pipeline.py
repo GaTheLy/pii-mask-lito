@@ -229,6 +229,15 @@ def mask(
             for step in report.trace:
                 if step.get("doc_type"):
                     report.doc_type = step["doc_type"]
+            failed_pages = [
+                step for step in report.trace
+                if step.get("agent") == "semantic_page" and step.get("failed")
+            ]
+            if failed_pages:
+                report.review.append(
+                    f"semantic assistance failed on {len(failed_pages)} page(s); "
+                    "those pages used rules-only fallback"
+                )
         os.replace(tmp.name, dest)
     finally:
         if os.path.exists(tmp.name):

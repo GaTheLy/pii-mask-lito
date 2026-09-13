@@ -150,7 +150,16 @@ pii-mask-lito input.pdf -o output.pdf --agents qwen2.5vl:7b --mode strict-union
 ```
 
 If the model fails or returns malformed output, both agent-enabled modes fall
-back to the complete rule result for that page.
+back to the complete rule result for that page. The CLI reports how many
+semantic pages succeeded and adds a review warning whenever a page falls back,
+so a rules-only result cannot be mistaken for a successful hybrid run.
+
+The local Ollama transport disables model thinking and requests only a compact
+list of candidate IDs to keep. Per-page traces include value-free model load,
+prompt, and output timings when Ollama provides them. Model and hardware choice
+still dominate runtime; benchmark a representative synthetic workload before
+using an agent mode for long documents.
+
 `--audit` adds a separate semantic pass over finished page pixels; its findings
 are review flags rather than automatic masks or verification failures.
 
