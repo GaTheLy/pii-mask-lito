@@ -479,6 +479,16 @@ def test_cli_confidence_score_is_bounded():
         parser.parse_args(["in.txt", "-o", "out.txt", "--min-score", "1.1"])
 
 
+def test_cli_agent_modes_are_explicit(tmp_path, capsys):
+    from pii_mask_lito.cli import main as cli_main
+
+    output = tmp_path / "masked.txt"
+    assert cli_main([
+        "samples/note.txt", "-o", str(output), "--mode", "hybrid"
+    ]) == 2
+    assert "requires --agents" in capsys.readouterr().err
+
+
 def test_cli_reports_missing_spacy_model_without_a_traceback(tmp_path, capsys):
     from pii_mask_lito.cli import main as cli_main
 
@@ -554,6 +564,59 @@ def test_report_trace_is_withheld_by_default():
     assert "Sensitive Person" not in safe
     assert '"trace": []' in safe
     assert '"trace_count": 1' in safe
+
+
+def test_agent_audit_adds_review_without_exposing_it_in_safe_report(tmp_path):
+    from PIL import Image
+
+    from pii_mask_lito.agents import Trace
+    from pii_mask_lito.pipeline import _audit_output
+
+    path = tmp_path / "masked.png"
+    Image.new("RGB", (20, 20), "white").save(path)
+
+    class FakeAuditor:
+        def run(self, _image):
+            return ["Mira Calder"]
+
+    class FakeSemantic:
+        auditor = FakeAuditor()
+        trace = Trace()
+
+    report = Report(source="input.png", output=str(path), engine="test")
+    semantic = FakeSemantic()
+    _audit_output(str(path), semantic, report)
+
+    assert report.review == [
+        "agent audit page 1: possible remaining identifier: Mira Calder"
+    ]
+    assert semantic.trace.steps[0]["remaining"] == 1
+    assert "Mira Calder" not in report.to_json()
+
+
+def test_agent_audit_failure_requires_manual_review_but_does_not_crash(tmp_path):
+    from PIL import Image
+
+    from pii_mask_lito.agents import Trace
+    from pii_mask_lito.pipeline import _audit_output
+
+    path = tmp_path / "masked.png"
+    Image.new("RGB", (20, 20), "white").save(path)
+
+    class FailingAuditor:
+        def run(self, _image):
+            raise RuntimeError("model unavailable")
+
+    class FakeSemantic:
+        auditor = FailingAuditor()
+        trace = Trace()
+
+    report = Report(source="input.png", output=str(path), engine="test")
+    semantic = FakeSemantic()
+    _audit_output(str(path), semantic, report)
+
+    assert report.review == ["agent audit page 1 failed; manual review required"]
+    assert semantic.trace.steps[0]["failed"] == "RuntimeError"
 
 
 def test_a_small_image_panel_is_still_read():

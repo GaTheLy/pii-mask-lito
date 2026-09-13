@@ -125,11 +125,34 @@ treat such a report as sensitive source data and do not commit or share it.
 box area. It is intended for diagnosing over-masking without disclosing values,
 paths, page coordinates, or custom labels.
 
-The optional `--agents` mode can use a local or hosted vision-language model to
-suggest additional document context. It never supplies rendering coordinates;
-matching and placement remain deterministic. A hosted model sends page images
-and OCR-derived content to the selected provider. Do not enable it until that
-data transfer is approved for your documents.
+For PDF and image inputs, the optional `--agents` mode can use a local or hosted
+vision-language model to make semantic masking decisions from the page image,
+OCR tokens, and numbered rule candidates. It never supplies rendering
+coordinates; matching and placement remain deterministic. A hosted model sends
+page images and OCR-derived content to the selected provider. Do not enable it
+until that data transfer is approved for your documents.
+
+Decision modes are explicit:
+
+- `rules-only` makes no model call and is the default without `--agents`.
+- `hybrid` is the default with `--agents`; explicit model `keep` decisions may
+  veto soft PERSON, LOCATION, ORGANIZATION, DATE, PHONE, and contextual-ID
+  candidates. Validated government/financial identifiers and barcode/vision
+  detections remain mandatory.
+- `strict-union` preserves every rule mask and lets the model add masks only.
+
+```bash
+# One local semantic request per page; soft false positives may be kept
+pii-mask-lito input.pdf -o output.pdf --agents qwen2.5vl:7b --mode hybrid
+
+# Maximum-recall union with no semantic veto
+pii-mask-lito input.pdf -o output.pdf --agents qwen2.5vl:7b --mode strict-union
+```
+
+If the model fails or returns malformed output, both agent-enabled modes fall
+back to the complete rule result for that page.
+`--audit` adds a separate semantic pass over finished page pixels; its findings
+are review flags rather than automatic masks or verification failures.
 
 ## Verification and review
 

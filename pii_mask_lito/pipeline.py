@@ -152,6 +152,8 @@ def mask(
     registry = registry or TagRegistry()
     suffix = Path(src).suffix.lower()
     report = Report(source=src, output=dest, engine=ocr_engine)
+    if vlm is not None and hasattr(vlm, "begin_document"):
+        vlm.begin_document()
 
     # Write to a temporary file first: a document that fails verification must
     # never appear at the destination path, even briefly.
@@ -220,6 +222,8 @@ def mask(
                     f"readable in output that no detector proposed; refusing to write "
                     "the destination"
                 )
+        if vlm is not None and getattr(vlm, "auditor", None) is not None:
+            _audit_output(tmp.name, vlm, report)
         if vlm is not None and getattr(vlm, "trace", None):
             report.trace = vlm.trace.steps
             for step in report.trace:
@@ -441,8 +445,11 @@ def _mask_pdf_images(src, dest, detector, registry, report, engine, dpi, vlm,
         page_spans.append(spans)
 
     for index, tt in enumerate(tts):
+        propagated = detector.propagate(tt)
+        if vlm is not None and hasattr(vlm, "filter_late_spans"):
+            propagated = vlm.filter_late_spans(index, tt, propagated)
         spans = merge_spans(
-            page_spans[index] + detector.propagate(tt) + symbol_spans.get(index, [])
+            page_spans[index] + propagated + symbol_spans.get(index, [])
         )
         boxes, layer = [], []
         for span in spans:
@@ -484,7 +491,8 @@ def _mask_pdf_images(src, dest, detector, registry, report, engine, dpi, vlm,
         if active_pages:
             _recheck(loop or engine, detector, registry, report,
                      masked_images, text_layers, page_boxes,
-                     originals=dict(enumerate(tts)), active_pages=active_pages)
+                     originals=dict(enumerate(tts)), active_pages=active_pages,
+                     semantic=vlm)
 
     pdf.write(src, dest, masked_images, text_layers, dpi)
 
@@ -526,7 +534,8 @@ def _draw(tt, spans, index, registry, report, text_layers, page_boxes, source):
 
 
 def _recheck(engine, detector, registry, report, masked_images, text_layers, page_boxes,
-             originals=None, max_passes: int = 4, active_pages=None) -> None:
+             originals=None, max_passes: int = 4, active_pages=None,
+             semantic=None) -> None:
     """Re-OCR the masked pages and mask anything known that is still readable.
 
     OCR can change after masks alter the page image. Re-reading catches values
@@ -587,9 +596,16 @@ def _recheck(engine, detector, registry, report, masked_images, text_layers, pag
             tokens = reads.get(index)
             if tokens is None:
                 # Converged on the image; the lexicon may still have news for it.
-                drawn = bool(originals and index in originals and _draw(
-                    originals[index], detector.propagate(originals[index]), index,
-                    registry, report, text_layers, page_boxes, "recheck"))
+                propagated = detector.propagate(originals[index]) \
+                    if originals and index in originals else []
+                if (propagated and semantic is not None
+                        and hasattr(semantic, "filter_late_spans")):
+                    propagated = semantic.filter_late_spans(
+                        index, originals[index], propagated
+                    )
+                drawn = bool(propagated and _draw(
+                    originals[index], propagated, index, registry, report,
+                    text_layers, page_boxes, "recheck"))
                 if drawn:
                     remask(index)
                     active.add(index)
@@ -603,10 +619,15 @@ def _recheck(engine, detector, registry, report, masked_images, text_layers, pag
             # rendering. Previously learned names remain covered by propagation.
             found = [s for s in found
                      if not (s.entity == "PERSON" and s.source == "structural")]
+            if semantic is not None and hasattr(semantic, "filter_late_spans"):
+                found = semantic.filter_late_spans(index, tt, found)
             # Learn only from recognizers with stable evidence on a degraded,
             # partly masked rendering.
             detector.learn([s for s in found if s.source in _TRUSTED_ON_RERENDER], tt)
-            spans = merge_spans(found + detector.propagate(tt))
+            propagated = detector.propagate(tt)
+            if semantic is not None and hasattr(semantic, "filter_late_spans"):
+                propagated = semantic.filter_late_spans(index, tt, propagated)
+            spans = merge_spans(found + propagated)
             drawn = _draw(tt, spans, index, registry, report,
                           text_layers, page_boxes, "recheck")
 
@@ -621,8 +642,11 @@ def _recheck(engine, detector, registry, report, masked_images, text_layers, pag
             # geometry anyway, so this is the cheaper half of the pass.
             if originals and index in originals:
                 source = originals[index]
-                drawn |= _draw(source, detector.propagate(source), index, registry,
-                               report, text_layers, page_boxes, "recheck")
+                propagated = detector.propagate(source)
+                if semantic is not None and hasattr(semantic, "filter_late_spans"):
+                    propagated = semantic.filter_late_spans(index, source, propagated)
+                drawn |= _draw(source, propagated, index, registry, report,
+                               text_layers, page_boxes, "recheck")
             if not drawn:
                 active.discard(index)
                 continue
@@ -667,7 +691,10 @@ def _mask_image(src, dest, detector, registry, report, engine, vlm,
     tt = TokenText(tokens)
     spans = vlm.detect(image, tt) if vlm is not None else detector.detect(tt)
     detector.learn(spans, tt)
-    spans = merge_spans(spans + detector.propagate(tt) + symbol_extra)
+    propagated = detector.propagate(tt)
+    if vlm is not None and hasattr(vlm, "filter_late_spans"):
+        propagated = vlm.filter_late_spans(0, tt, propagated)
+    spans = merge_spans(spans + propagated + symbol_extra)
     boxes = []
     for span in spans:
         tag = registry.tag(span.entity, span.text)
@@ -841,6 +868,42 @@ def _verify_symbols(path: str) -> list[str]:
         finally:
             image.close()
     return leaked
+
+
+def _audit_output(path: str, semantic, report: Report) -> None:
+    """Run an optional semantic review over finished pixels, as review flags."""
+    import time
+
+    suffix = Path(path).suffix.lower()
+    if suffix in PDF_SUFFIXES:
+        rendered = enumerate(pdf.iter_page_images(path))
+    elif suffix in IMAGE_SUFFIXES:
+        rendered = enumerate([images.load(path)])
+    else:
+        return
+    for page, image in rendered:
+        started = time.time()
+        try:
+            remaining = semantic.auditor.run(image)
+        except Exception as exc:  # noqa: BLE001 - audit is advisory
+            semantic.trace.add(
+                "auditor", time.time() - started,
+                {"page": page + 1, "failed": type(exc).__name__},
+            )
+            report.review.append(
+                f"agent audit page {page + 1} failed; manual review required"
+            )
+            continue
+        finally:
+            image.close()
+        semantic.trace.add(
+            "auditor", time.time() - started,
+            {"page": page + 1, "remaining": len(remaining)},
+        )
+        report.review.extend(
+            f"agent audit page {page + 1}: possible remaining identifier: {value}"
+            for value in remaining
+        )
 
 
 def _table_noise(span) -> bool:

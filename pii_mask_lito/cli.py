@@ -125,15 +125,23 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const="gemma4:31b",
         metavar="MODEL",
-        help="read the document with a VLM agent pipeline alongside the rules: "
-             "classify, read fields and owners, adjudicate, then ground "
-             "deterministically. MODEL picks the host as well as the model -- an "
+        help="use one VLM semantic decision pass per PDF/image page, then "
+             "ground all masks deterministically. MODEL picks the host as well "
+             "as the model -- an "
              "Ollama tag stays local (gemma4:31b, qwen2.5vl:7b), while "
              "'gemini-3.8-flash', 'openrouter:MODEL', 'vllm:MODEL' or "
              "'openai-compatible:MODEL@https://host/v1' run it remotely. Hosted "
              "providers read the key from GEMINI_API_KEY / OPENAI_API_KEY / "
              "OPENROUTER_API_KEY and send page images off the machine; approve "
              "the provider and transfer before using sensitive documents.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["rules-only", "hybrid", "strict-union"],
+        default=None,
+        help="masking decision mode: rules-only makes no model call; hybrid "
+             "lets the model keep soft candidates; strict-union lets the model "
+             "add masks only. Default: hybrid with --agents, otherwise rules-only",
     )
     parser.add_argument(
         "--audit",
@@ -222,6 +230,13 @@ def _unwritable(args, out: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    mode = args.mode or ("hybrid" if args.agents else "rules-only")
+    if mode != "rules-only" and not args.agents:
+        print(f"error: --mode {mode} requires --agents [MODEL]", file=sys.stderr)
+        return 2
+    if mode == "rules-only" and args.audit:
+        print("error: --audit requires an agent-enabled mode", file=sys.stderr)
+        return 2
     out = Path(args.out)
     if len(args.src) > 1 and not out.is_dir():
         print("error: --out must be a directory for multiple inputs", file=sys.stderr)
@@ -246,11 +261,12 @@ def main(argv: list[str] | None = None) -> int:
     # a PDF and its companion spreadsheet.
     registry = TagRegistry(short=not args.long_tags)
     reviewer = None
-    if args.agents:
+    if args.agents and mode != "rules-only":
         from . import agents
 
         reviewer = agents.build(
-            detector, model_name=args.agents, host=args.ollama_host, audit=args.audit
+            detector, model_name=args.agents, host=args.ollama_host,
+            audit=args.audit, mode=mode,
         )
 
     reports, failed = [], 0
