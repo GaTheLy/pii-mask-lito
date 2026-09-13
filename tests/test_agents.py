@@ -9,6 +9,8 @@ from pii_mask_lito.agents import (
     Field,
     Ollama,
     OpenAICompatible,
+    SEMANTIC_PAGE,
+    SemanticPageAnalyzer,
     _coerce_fields,
     _first_json,
     _safe_doc_type,
@@ -24,6 +26,9 @@ def test_canonical_type_maps_cross_domain_labels():
     assert canonical_type("customer name") == "PERSON"
     assert canonical_type("postal code") == "LOCATION"
     assert canonical_type("company") == "ORGANIZATION"
+    assert canonical_type("medical record number") == "MEDICAL_RECORD_NUMBER"
+    assert canonical_type("passport number") == "US_PASSPORT"
+    assert canonical_type("credit card") == "CREDIT_CARD"
     assert canonical_type("unknown category") is None
 
 
@@ -31,6 +36,39 @@ def test_first_json_ignores_model_wrapping():
     assert _first_json('Result follows: {"doc_type": "invoice"}\nDone.') == {
         "doc_type": "invoice"
     }
+
+
+def test_semantic_prompt_does_not_seed_a_candidate_id():
+    assert '"keep_candidate_ids":[0]' not in SEMANTIC_PAGE
+    assert "never insert an example" in SEMANTIC_PAGE
+    assert "Do not keep a contextual ID" in SEMANTIC_PAGE
+
+
+def test_semantic_candidate_listing_includes_local_context():
+    class CapturingModel:
+        prompt = ""
+
+        def ask(self, prompt, _image=None):
+            self.prompt = prompt
+            return {"doc_type": "form", "keep_candidate_ids": [], "fields": []}
+
+    class Rules:
+        mask_providers = True
+        mask_organizations = False
+
+        class spatial:
+            min_masked_age = 0
+
+    text = TokenText.from_text("Order ID ORDER-8451 Customer Name Mira")
+    start = text.text.index("ORDER-8451")
+    candidate = Span(
+        "GENERIC_ID", start, start + len("ORDER-8451"), 0.8,
+        "ORDER-8451", text.tokens_for(start, start + len("ORDER-8451")), "spatial",
+    )
+    model = CapturingModel()
+    SemanticPageAnalyzer(model).run(None, text, [candidate], Rules())
+    assert "tokens=[2]" in model.prompt
+    assert 'context="Order ID ORDER-8451 Customer Name Mira"' in model.prompt
 
 
 def test_ollama_disables_thinking_and_bounds_structured_output(monkeypatch):
@@ -151,6 +189,27 @@ def test_hybrid_vetoes_soft_candidate_but_not_validated_identifier():
     ]
 
 
+def test_hybrid_locks_contextual_and_explicitly_labelled_candidates():
+    from pii_mask_lito.detect import Detector
+
+    text = TokenText.from_text("Employee Name Dorian Order ID ORDER-8451")
+    detector = AgenticDetector.__new__(AgenticDetector)
+    detector.rules = Detector(entities=[])
+    detector.locked_values = set()
+    person_start = text.text.index("Dorian")
+    person = Span(
+        "PERSON", person_start, person_start + 6, 0.7, "Dorian",
+        text.tokens_for(person_start, person_start + 6), "presidio",
+    )
+    id_start = text.text.index("ORDER-8451")
+    contextual_id = Span(
+        "GENERIC_ID", id_start, id_start + 10, 0.8, "ORDER-8451",
+        text.tokens_for(id_start, id_start + 10), "spatial",
+    )
+    assert detector._candidate_locked(person, text)
+    assert detector._candidate_locked(contextual_id, text)
+
+
 def test_hybrid_keep_region_blocks_late_soft_spans_only():
     tt = TokenText([
         Token("Category", 0, (0.10, 0.20, 0.20, 0.23), 0),
@@ -198,18 +257,29 @@ class _FakeSemanticModel:
         }
 
 
-def test_hybrid_uses_one_call_to_keep_soft_candidate_and_add_field():
+def test_hybrid_uses_one_call_to_keep_soft_candidate_without_adding_fields():
     model = _FakeSemanticModel()
     detector = AgenticDetector(
         _FakeRules(), model=model, verbose=False, mode="hybrid"
     )
     found = detector.detect(object(), TokenText.from_text("Category REF-5509-ZINC"))
     assert model.calls == 1
-    assert [(span.entity, span.text) for span in found] == [
-        ("GENERIC_ID", "REF-5509-ZINC")
-    ]
+    assert found == []
     assert detector.trace.steps[0]["agent"] == "semantic_page"
     assert detector.trace.steps[0]["doc_type"] == "order form"
+
+
+def test_strict_union_uses_one_call_to_add_fields_without_vetoing_rules():
+    model = _FakeSemanticModel()
+    detector = AgenticDetector(
+        _FakeRules(), model=model, verbose=False, mode="strict-union"
+    )
+    found = detector.detect(object(), TokenText.from_text("Category REF-5509-ZINC"))
+    assert model.calls == 1
+    assert {(span.entity, span.text) for span in found} == {
+        ("PERSON", "Category"),
+        ("GENERIC_ID", "REF-5509-ZINC"),
+    }
 
 
 def test_rules_only_never_calls_model_and_model_failure_keeps_rules():
@@ -330,6 +400,37 @@ def test_grounding_does_not_mask_ambiguous_or_non_person_model_fields():
     ]
     spans, kept = detector._ground(tt, fields)
     assert spans == [] and kept == set()
+
+
+def test_discovered_field_keeps_have_no_veto_authority():
+    tt = TokenText.from_text("Category")
+    detector = AgenticDetector.__new__(AgenticDetector)
+    detector.rules = _FakeRules()
+    spans, kept = detector._ground(tt, [
+        Field(label="Category", value="Category", owner="other",
+              entity="PERSON", decision="keep")
+    ])
+    assert spans == [] and kept == set()
+
+
+def test_model_added_masks_respect_the_active_entity_policy():
+    class EmailOnlyRules(_FakeRules):
+        entities = ["EMAIL_ADDRESS"]
+
+    tt = TokenText.from_text("Mira REF-5509-ZINC mira@example.test")
+    detector = AgenticDetector.__new__(AgenticDetector)
+    detector.rules = EmailOnlyRules()
+    spans, _ = detector._ground(tt, [
+        Field(label="Name", value="Mira", owner="customer",
+              entity="PERSON", decision="mask"),
+        Field(label="Reference ID", value="REF-5509-ZINC", owner="customer",
+              entity="GENERIC_ID", decision="mask"),
+        Field(label="Email", value="mira@example.test", owner="customer",
+              entity="EMAIL_ADDRESS", decision="mask"),
+    ])
+    assert [(span.entity, span.text) for span in spans] == [
+        ("EMAIL_ADDRESS", "mira@example.test")
+    ]
 
 
 def test_grounding_honors_professional_and_organization_policy():

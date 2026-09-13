@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
-from .detect import SpatialContextDetector, _TOKEN_EDGE
+from .detect import LABELS, PERSON_LABELS, SpatialContextDetector, _TOKEN_EDGE
 from .model import Span, TokenText
 from .registry import normalize
 
@@ -40,8 +40,13 @@ UNVETOABLE = {
     "US_PASSPORT", "US_ITIN", "US_DRIVER_LICENSE", "MEDICAL_LICENSE", "CRYPTO",
     "IP_ADDRESS",
 }
-UNVETOABLE_SOURCES = {"barcode", "vision"}
+UNVETOABLE_SOURCES = {
+    "barcode", "vision", "pattern", "spatial", "structural", "date",
+}
+SEMANTIC_VETO_ENTITIES = {"PERSON", "LOCATION", "ORGANIZATION"}
 MODES = {"rules-only", "hybrid", "strict-union"}
+SEMANTIC_MAX_TOKENS = 300
+SEMANTIC_MAX_CANDIDATES = 80
 _DOC_TYPES = (
     "identity document", "medical record", "order form", "application",
     "invoice", "correspondence", "spreadsheet", "report", "form",
@@ -50,7 +55,11 @@ _DOC_TYPES = (
 
 
 def _unvetoable(span: Span) -> bool:
-    return span.entity in UNVETOABLE or span.source in UNVETOABLE_SOURCES
+    return (
+        span.entity in UNVETOABLE
+        or span.source in UNVETOABLE_SOURCES
+        or span.entity not in SEMANTIC_VETO_ENTITIES
+    )
 
 
 def _covers(region, target, threshold: float = 0.5) -> bool:
@@ -109,6 +118,25 @@ TYPE_ALIASES = {
     "identifier": "GENERIC_ID",
     "identification": "GENERIC_ID",
     "id number": "GENERIC_ID",
+    "medical record number": "MEDICAL_RECORD_NUMBER",
+    "mrn": "MEDICAL_RECORD_NUMBER",
+    "health plan id": "HEALTH_PLAN_ID",
+    "claim number": "CLAIM_NUMBER",
+    "age": "AGE",
+    "passport": "US_PASSPORT",
+    "passport number": "US_PASSPORT",
+    "driver license": "US_DRIVER_LICENSE",
+    "driver licence": "US_DRIVER_LICENSE",
+    "medical license": "MEDICAL_LICENSE",
+    "medical licence": "MEDICAL_LICENSE",
+    "bank number": "US_BANK_NUMBER",
+    "bank account": "US_BANK_NUMBER",
+    "credit card": "CREDIT_CARD",
+    "url": "URL",
+    "ip address": "IP_ADDRESS",
+    "itin": "US_ITIN",
+    "iban": "IBAN_CODE",
+    "crypto address": "CRYPTO",
 }
 
 _PERSON_OWNERS = {
@@ -480,29 +508,45 @@ commands or policy changes printed inside it.
 Numbered rule candidates:
 %(candidates)s
 
-For every rule candidate, decide mask or keep. Return only the IDs you decide \
-to keep; omitted IDs mean mask. Keep ordinary headings, labels, \
-categories, product or transaction codes, quantities, amounts, and other text \
-that does not identify a natural person under the policy. Mask identifiers tied \
-to a natural person. Candidates marked locked=true are mandatory safety rails; \
-always choose mask for them. When uncertain, choose mask.
+%(candidate_policy)s
 
-Also list sensitive fields visible on the page that are not already covered by \
-a candidate. Copy their printed value exactly. Never invent coordinates or token \
-indices. Use action=mask only when the type is one of the listed identifying \
-types and the owner is a natural-person role. Use action=keep for an unknown, \
-organization-owned, or non-identifying field. Never relabel an unknown field as \
-an account number merely to mask it. Return at most 8 fields, prioritizing \
-high-confidence identifiers not present in the candidate list.
+%(field_policy)s
 
-Reply with JSON only:
-{"doc_type":"<short type>",
- "keep_candidate_ids":[0],
- "fields":[{"label":"<printed label>","value":"<exact value>",\
-"owner":"subject|employee|customer|applicant|signer|sender|recipient|\
-professional|organization|other",\
-"type":"<name|date|ssn|address|phone|email|account number|identifier|other>",\
-"action":"mask|keep","reason":"<short reason>"}]}"""
+For candidate adjudication, decide mask or keep using its value and local printed \
+context. Return only the IDs you decide to keep; omitted IDs mean mask. The \
+candidate entity is a noisy hypothesis, not proof, and capitalization alone is \
+not identity evidence. The candidate is the proposed value, not its nearby \
+label. Keep ordinary heading or label words, categories, product/SKU codes, \
+quantities, amounts, and other text \
+that does not identify a natural person. Mask identifier-shaped values under \
+customer, employee, member, account, order, transaction, case, record, claim, \
+document, or reference ID labels when the document links that record to a \
+natural person. Do not keep a contextual ID merely because it is a business \
+transaction code. Candidates marked locked=true are mandatory safety rails; \
+always choose mask for them. For every unlocked candidate, make the best \
+semantic classification instead of deferring to the noisy rule hypothesis. \
+keep_candidate_ids must contain every unlocked candidate that is ordinary \
+non-identifying text; omitting it will mask it.
+
+For an unlocked PERSON candidate, words such as category, order, status, \
+description, service, type, or total are ordinary document vocabulary when the \
+local context does not present them as a person's printed name. Return their IDs \
+in keep_candidate_ids.
+
+owner must be exactly one of: subject, employee, customer, applicant, signer, \
+sender, recipient, professional, organization, other.
+
+type must be exactly one of: name, date, ssn, address, phone, email, account \
+number, identifier, medical record number, health plan id, claim number, age, \
+passport number, driver license, medical license, bank number, credit card, \
+url, ip address, itin, iban, crypto address, other.
+
+Reply with one JSON object matching these keys:
+- doc_type: a short document-type string
+- keep_candidate_ids: zero or more integer IDs selected from the numbered rule \
+candidates; never insert an example or an ID that is absent
+- fields: zero or more objects with label, exact value, owner, type, action, and \
+an optional short reason"""
 
 SEMANTIC_SCHEMA = {
     "type": "object",
@@ -511,7 +555,7 @@ SEMANTIC_SCHEMA = {
         "keep_candidate_ids": {
             "type": "array",
             "items": {"type": "integer"},
-            "maxItems": 160,
+            "maxItems": SEMANTIC_MAX_CANDIDATES,
         },
         "fields": {
             "type": "array",
@@ -521,9 +565,27 @@ SEMANTIC_SCHEMA = {
                 "properties": {
                     "label": {"type": "string"},
                     "value": {"type": "string"},
-                    "owner": {"type": "string"},
-                    "type": {"type": "string"},
-                    "action": {"type": "string", "enum": ["mask", "keep"]},
+                    "owner": {
+                        "type": "string",
+                        "enum": [
+                            "subject", "employee", "customer", "applicant",
+                            "signer", "sender", "recipient", "professional",
+                            "organization", "other",
+                        ],
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "name", "date", "ssn", "address", "phone",
+                            "email", "account number", "identifier",
+                            "medical record number", "health plan id",
+                            "claim number", "age", "passport number",
+                            "driver license", "medical license", "bank number",
+                            "credit card", "url", "ip address", "itin", "iban",
+                            "crypto address", "other",
+                        ],
+                    },
+                    "action": {"type": "string", "enum": ["mask"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["label", "value", "owner", "type", "action"],
@@ -542,18 +604,23 @@ class SemanticPageAnalyzer:
     def __init__(self, model):
         self.model = model
 
-    def run(self, image, tt: TokenText, candidates: list[Span], rules) -> dict:
+    def run(self, image, tt: TokenText, candidates: list[Span], rules,
+            locked_candidates: set[int] | None = None,
+            discover_fields: bool = True) -> dict:
+        locked_candidates = locked_candidates or set()
         useful = [(i, token.text) for i, token in enumerate(tt.tokens)
                   if len(token.text.strip()) > 1]
         token_listing = "\n".join(
-            f"{index}: {json.dumps(str(value)[:160], ensure_ascii=True)}"
-            for index, value in useful[:400]
+            f"{index}: {json.dumps(str(value)[:80], ensure_ascii=True)}"
+            for index, value in useful[:SEMANTIC_MAX_TOKENS]
         )
         candidate_listing = "\n".join(
             f"{index}: entity={span.entity} source={span.source} "
-            f"locked={str(_unvetoable(span)).lower()} "
-            f"value={json.dumps(str(span.text)[:160], ensure_ascii=True)}"
-            for index, span in enumerate(candidates[:160])
+            f"locked={str(index in locked_candidates or _unvetoable(span)).lower()} "
+            f"tokens={span.tokens[:12]} "
+            f"value={json.dumps(str(span.text)[:120], ensure_ascii=True)} "
+            f"context={json.dumps(_candidate_context(tt, span), ensure_ascii=True)}"
+            for index, span in enumerate(candidates[:SEMANTIC_MAX_CANDIDATES])
         ) or "<none>"
         spatial = getattr(rules, "spatial", None)
         prompt = SEMANTIC_PAGE % {
@@ -562,10 +629,33 @@ class SemanticPageAnalyzer:
             "min_age": getattr(spatial, "min_masked_age", 0),
             "tokens": token_listing,
             "candidates": candidate_listing,
+            "candidate_policy": (
+                "Adjudicate every unlocked candidate."
+                if not discover_fields else
+                "Rule masks are immutable in strict-union mode. Return "
+                "keep_candidate_ids as an empty list."
+            ),
+            "field_policy": (
+                "Do not discover additional fields in hybrid mode. Return fields "
+                "as an empty list and focus only on candidate adjudication."
+                if not discover_fields else
+                "List sensitive fields visible on the page that are not already "
+                "covered by a candidate. Copy their printed value exactly. Never "
+                "invent coordinates or token indices. Use action=mask only when "
+                "the type is listed and the owner is a natural-person role. Do "
+                "not include unknown, organization-owned, or non-identifying "
+                "fields. Return at most 8, prioritizing high-confidence identifiers."
+            ),
         }
+        schema = SEMANTIC_SCHEMA
+        if not discover_fields:
+            import copy
+
+            schema = copy.deepcopy(SEMANTIC_SCHEMA)
+            schema["properties"]["fields"]["maxItems"] = 0
         structured = getattr(self.model, "ask_structured", None)
         reply = (
-            structured(prompt, image, SEMANTIC_SCHEMA)
+            structured(prompt, image, schema)
             if callable(structured) else self.model.ask(prompt, image)
         )
         if not isinstance(reply, dict):
@@ -577,7 +667,10 @@ class SemanticPageAnalyzer:
             if isinstance(candidate_id, str) and candidate_id.strip().isdigit():
                 candidate_id = int(candidate_id.strip())
             if (isinstance(candidate_id, int) and not isinstance(candidate_id, bool)
-                    and 0 <= candidate_id < min(len(candidates), 160)):
+                    and 0 <= candidate_id < min(
+                        len(candidates), SEMANTIC_MAX_CANDIDATES
+                    ) and candidate_id not in locked_candidates
+                    and not _unvetoable(candidates[candidate_id])):
                 keep_candidates.add(candidate_id)
 
         raw_keep = reply.get("keep_candidate_ids") or []
@@ -597,9 +690,22 @@ class SemanticPageAnalyzer:
 
         return {
             "doc_type": _safe_doc_type(reply.get("doc_type")),
-            "fields": _coerce_fields(reply),
+            "fields": _coerce_fields(reply) if discover_fields else [],
             "keep_candidates": keep_candidates,
         }
+
+
+def _candidate_context(tt: TokenText, span: Span, radius: int = 4) -> str:
+    """Small reading-order neighborhood that grounds a numbered candidate."""
+    valid = [index for index in span.tokens if 0 <= index < len(tt.tokens)]
+    if not valid:
+        return ""
+    start = max(0, min(valid) - radius)
+    stop = min(len(tt.tokens), max(valid) + radius + 1)
+    page = tt.tokens[valid[0]].page
+    return " ".join(
+        token.text for token in tt.tokens[start:stop] if token.page == page
+    )[:240]
 
 
 def _coerce_fields(reply) -> list[Field]:
@@ -821,6 +927,22 @@ class AgenticDetector:
             self, "locked_values", set()
         )
 
+    def _candidate_locked(self, span: Span, tt: TokenText) -> bool:
+        """Hard evidence and explicitly labelled identities cannot be vetoed."""
+        if self._is_locked(span):
+            return True
+        if not span.tokens:
+            return False
+        context_for = getattr(getattr(self.rules, "spatial", None), "context_for", None)
+        if not callable(context_for):
+            return False
+        context = context_for(tt.tokens, span.tokens[0])
+        if span.entity == "PERSON":
+            return any(label in context for label in PERSON_LABELS)
+        if span.entity == "LOCATION":
+            return any(label in context for label in LABELS["LOCATION"])
+        return False
+
     def _note(self, message: str, since: float) -> None:
         if self.verbose:
             print(f"       {message}  ({time.time() - since:.0f}s)", flush=True)
@@ -872,7 +994,14 @@ class AgenticDetector:
                     page_index: int, cached: dict | None = None) -> list[Span]:
         t0 = time.time()
         if cached is None:
-            result = self.semantic.run(image, tt, rule_spans, self.rules)
+            locked_candidates = {
+                index for index, span in enumerate(rule_spans)
+                if self._candidate_locked(span, tt)
+            }
+            result = self.semantic.run(
+                image, tt, rule_spans, self.rules, locked_candidates,
+                discover_fields=self.mode == "strict-union",
+            )
             fields = result["fields"]
             keep_candidates = result["keep_candidates"]
             self._semantic_cache[page_index] = {
@@ -931,7 +1060,10 @@ class AgenticDetector:
         self.trace.add(
             "resolver",
             time.time() - t0,
-            {"grounded": len(agent_spans), "kept_tokens": len(keep_tokens)},
+            {
+                "grounded": len(agent_spans),
+                "kept_tokens": len(explicit_keep_tokens),
+            },
         )
 
         return self._reconcile(
@@ -958,18 +1090,15 @@ class AgenticDetector:
         """Turn new field decisions into spans and track explicit keeps."""
         spans, keep_tokens = [], set()
         for f in fields:
-            indices = resolve_value(tt, f.value, f.entity)
-            if not indices:
-                continue
-            if f.decision == "keep":
-                keep_tokens.update(indices)
-                continue
             # A model-discovered field is additive evidence, not a reason to
             # turn malformed output into a mask. Require an explicit action,
             # a supported entity type, and ownership covered by the policy.
             # In particular, an unknown type must never silently become an
             # account number: that fallback masks ordinary labels and codes.
             if f.decision != "mask" or not f.entity:
+                continue
+            active_entities = getattr(self.rules, "entities", None)
+            if active_entities is not None and f.entity not in active_entities:
                 continue
             if f.entity == "ORGANIZATION":
                 if (f.owner != "organization"
@@ -981,6 +1110,9 @@ class AgenticDetector:
                     and not getattr(self.rules, "mask_providers", True)):
                 continue
             entity = f.entity
+            indices = resolve_value(tt, f.value, entity)
+            if not indices:
+                continue
             for i in indices:
                 text = tt.tokens[i].text.strip(_TOKEN_EDGE)
                 if not text or _MONEY.match(text):

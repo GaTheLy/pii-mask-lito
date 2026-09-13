@@ -136,10 +136,16 @@ Decision modes are explicit:
 
 - `rules-only` makes no model call and is the default without `--agents`.
 - `hybrid` is the default with `--agents`; explicit model `keep` decisions may
-  veto soft PERSON, LOCATION, ORGANIZATION, DATE, PHONE, and contextual-ID
-  candidates. Validated government/financial identifiers and barcode/vision
-  detections remain mandatory.
-- `strict-union` preserves every rule mask and lets the model add masks only.
+  veto only unlabeled semantic-NER PERSON, LOCATION, and ORGANIZATION
+  candidates. Pattern, spatial-label, structural, date, barcode, and vision
+  detections remain mandatory. Hybrid focuses only on adjudicating candidates;
+  it does not add free-form fields.
+- `strict-union` preserves every rule mask and uses the model only to discover
+  additional fields.
+
+Model-discovered masks are constrained to the active profile or `--entities`
+set. Only explicit IDs from the numbered rule-candidate list can create hybrid
+keep regions; free-form discovered fields cannot suppress later detections.
 
 ```bash
 # Install the recommended local model once
