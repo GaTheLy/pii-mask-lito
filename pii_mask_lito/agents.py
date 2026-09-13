@@ -160,7 +160,7 @@ class Trace:
 # OCR benefits from a high-resolution source. The model receives the OCR token
 # list separately and needs the image only for layout context, so a smaller
 # raster saves vision tokens without changing mask geometry.
-VLM_MAX_EDGE = 1400
+VLM_MAX_EDGE = 1024
 
 
 def _encode(image, max_edge: int) -> str:
@@ -233,12 +233,19 @@ class Ollama:
         self.last_metrics: dict[str, int | float] = {}
 
     def ask(self, prompt: str, image=None) -> dict:
+        return self._request(prompt, image, "json")
+
+    def ask_structured(self, prompt: str, image, schema: dict) -> dict:
+        """Ask with Ollama's server-enforced JSON schema output."""
+        return self._request(prompt, image, schema)
+
+    def _request(self, prompt: str, image, output_format) -> dict:
         self.last_metrics = {}
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "format": "json",
+            "format": output_format,
             # Thinking is enabled by default for Qwen 3-family models. This
             # stage needs a short structured decision, not a reasoning trace;
             # disabling it removes unobserved generation latency. Bound normal
@@ -485,7 +492,7 @@ a candidate. Copy their printed value exactly. Never invent coordinates or token
 indices. Use action=mask only when the type is one of the listed identifying \
 types and the owner is a natural-person role. Use action=keep for an unknown, \
 organization-owned, or non-identifying field. Never relabel an unknown field as \
-an account number merely to mask it. Return at most 20 fields, prioritizing \
+an account number merely to mask it. Return at most 8 fields, prioritizing \
 high-confidence identifiers not present in the candidate list.
 
 Reply with JSON only:
@@ -496,6 +503,35 @@ Reply with JSON only:
 professional|organization|other",\
 "type":"<name|date|ssn|address|phone|email|account number|identifier|other>",\
 "action":"mask|keep","reason":"<short reason>"}]}"""
+
+SEMANTIC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "doc_type": {"type": "string"},
+        "keep_candidate_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "maxItems": 160,
+        },
+        "fields": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "value": {"type": "string"},
+                    "owner": {"type": "string"},
+                    "type": {"type": "string"},
+                    "action": {"type": "string", "enum": ["mask", "keep"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["label", "value", "owner", "type", "action"],
+            },
+        },
+    },
+    "required": ["doc_type", "keep_candidate_ids", "fields"],
+}
 
 
 class SemanticPageAnalyzer:
@@ -527,7 +563,11 @@ class SemanticPageAnalyzer:
             "tokens": token_listing,
             "candidates": candidate_listing,
         }
-        reply = self.model.ask(prompt, image)
+        structured = getattr(self.model, "ask_structured", None)
+        reply = (
+            structured(prompt, image, SEMANTIC_SCHEMA)
+            if callable(structured) else self.model.ask(prompt, image)
+        )
         if not isinstance(reply, dict):
             return {"doc_type": "unknown", "fields": [], "keep_candidates": set()}
 
@@ -570,19 +610,27 @@ def _coerce_fields(reply) -> list[Field]:
     if not isinstance(raw, list):
         return []
     fields = []
-    for item in raw[:80]:
+    for item in raw[:8]:
         if not isinstance(item, dict):
             continue  # a bare string carries no value or owner; nothing to ground
         label = str(item.get("label") or "").strip()
         if not label:
             continue
         action = str(item.get("action") or "").strip().casefold()
+        # Printed labels are copied from the page and mapped by the same public,
+        # document-neutral vocabulary as rule detection. If a model calls an
+        # EMPLOYEE NAME an identifier, trusting that free-form type causes the
+        # ID shape check to discard a real name. A recognized label is the more
+        # stable signal; unknown labels still use the declared type.
+        entity = canonical_type(label) or canonical_type(
+            str(item.get("type") or "")
+        ) or ""
         fields.append(
             Field(
                 label=label,
                 value=str(item.get("value") or "").strip(),
                 owner=str(item.get("owner") or "unknown").strip().casefold(),
-                entity=canonical_type(str(item.get("type") or "")) or "",
+                entity=entity,
                 decision=action if action in {"mask", "keep"} else "",
                 reason=str(item.get("reason") or "")[:80],
             )

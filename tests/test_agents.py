@@ -61,6 +61,10 @@ def test_ollama_disables_thinking_and_bounds_structured_output(monkeypatch):
         "output_tokens": 42,
     }
 
+    schema = {"type": "object", "properties": {"fields": {"type": "array"}}}
+    model.ask_structured("decide", None, schema)
+    assert sent["format"] == schema
+
 
 def test_document_type_is_reduced_to_a_safe_log_category():
     assert _safe_doc_type("Invoice for Mira Calder") == "invoice"
@@ -78,6 +82,10 @@ def test_malformed_field_output_is_ignored():
     assert _coerce_fields(reply) == [
         Field(label="Customer ID", value="CUS-4827-9136", entity="GENERIC_ID")
     ]
+    many = {"fields": [
+        {"label": f"Field {index}", "value": str(index)} for index in range(12)
+    ]}
+    assert len(_coerce_fields(many)) == 8
 
 
 def test_semantic_field_action_and_reason_are_coerced():
@@ -91,6 +99,20 @@ def test_semantic_field_action_and_reason_are_coerced():
     assert fields == [
         Field(label="Category", value="Order", decision="keep",
               reason="ordinary heading")
+    ]
+
+
+def test_recognized_printed_label_overrides_inconsistent_model_type():
+    fields = _coerce_fields({"fields": [{
+        "label": "Employee Name",
+        "value": "Dorian Vale",
+        "owner": "employee",
+        "type": "identifier",
+        "action": "mask",
+    }]})
+    assert fields == [
+        Field(label="Employee Name", value="Dorian Vale", owner="employee",
+              entity="PERSON", decision="mask")
     ]
 
 
