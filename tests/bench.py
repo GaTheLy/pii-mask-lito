@@ -106,8 +106,8 @@ def run(path: str, engines: list[str], limit: int | None, dpi: int, workers: int
               f"{parallel['total']:7.1f}s{speedup:8.1f}x{warn}")
 
     print(f"\nparallel column: {workers} threads over the same {n} pages, one shared engine.")
-    print("A full masking run may read pages during extraction, convergence rechecks,\n"
-          "and verification; measure end-to-end latency separately.")
+    print("A full masking run reads each page about 3.6 times -- once to extract, ~1.6\n"
+          "in the recheck loop, once to verify -- so multiply s/page accordingly.")
 
 
 # --------------------------------------------------------------------------

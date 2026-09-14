@@ -9,7 +9,7 @@ Python 3.10 or newer is required.
 
 ```bash
 git clone <your fork>
-cd pii-mask-lito
+cd pii-mask-service
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
@@ -56,8 +56,6 @@ do not add a downloaded dataset to a pull request.
 - Treat output and `--report-values` reports as sensitive. Inspect `git status`
   before committing.
 - Use `tmp/` or another ignored local location for scratch artifacts.
-- Run `python tools/privacy_gate.py` before submitting; the same value-safe
-  tracked-content scan runs in CI.
 
 If you need to report a missed identifier, create a minimal synthetic
 reproducer that preserves only the relevant layout and value shape.

@@ -1,9 +1,15 @@
-"""Measure sensitivity to each tuning constant on the synthetic corpus.
+"""What each tuning constant actually buys.
 
-Moving one constant at a time reveals stable plateaus and sharp quality cliffs
-without tying a threshold to one document. Flat columns identify robust ranges;
-sharp changes identify parameters that need broader fixtures or a documented
-trade-off.
+Every constant in this project was set by one measured failure and then left
+alone. That makes each of them individually defensible and collectively
+unknown: nobody can say which are sitting on a plateau, where a change costs
+nothing, and which are on a cliff, where the next document that differs
+slightly from the one they were tuned against falls off.
+
+This answers that by moving one constant at a time and re-scoring the whole
+corpus. A flat column is a constant nobody needs to be careful about. A column
+that drops sharply on one side is where the fragility lives, and is what should
+be written down next to the number.
 
 Run: `python -m tests.corpus.sweep` (slow -- it masks the corpus once per
 value), or `python -m tests.corpus.sweep above_gap` for one knob.
@@ -71,8 +77,10 @@ def _dpi_knob():
 
 
 # Ranges deliberately bracket the operating point on BOTH sides, including
-# values low enough to break the behavior. A sweep that never leaves the
-# plateau cannot show where a parameter becomes fragile.
+# values low enough to break the thing. A first pass swept only 0.015-0.08 for
+# above_gap and reported a dead-flat line, which reads as "this constant does
+# not matter" -- when in fact the cliff is at 0.01 and recall falls off it by
+# 35 points. A sweep that never leaves the plateau measures nothing.
 KNOBS = {
     "above_gap": ([0.0, 0.005, 0.01, 0.025, 0.08], _adjacency_knob("above_gap")),
     "left_gap": ([0.0, 0.02, 0.05, 0.18, 0.40], _adjacency_knob("left_gap")),

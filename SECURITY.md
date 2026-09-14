@@ -41,17 +41,6 @@ types outside the active policy. A successful verification result only means
 the tool's configured checks found no remaining issue; it is not proof that no
 identifier remains.
 
-In `hybrid` mode, a model may explicitly keep unlabeled PERSON, LOCATION, or
-ORGANIZATION NER candidates and can make an incorrect decision. Pattern,
-spatial-label, structural, date, barcode, and vision findings remain locked,
-and malformed or unavailable model output falls back to rules,
-but the mode still requires evaluation for the intended document class. Use
-`strict-union` when model decisions must never remove a rule detection.
-Model-added masks remain restricted to the selected profile/entity set, and
-only numbered rule candidates—not free-form discovered fields—can be kept.
-Hybrid performs candidate adjudication only; strict-union performs additive
-field discovery only.
-
 Review rendered output before it leaves your control. Use a policy selected and
 validated for the document class and risk level. Keep source documents, masked
 outputs, and reports in appropriate access-controlled storage.

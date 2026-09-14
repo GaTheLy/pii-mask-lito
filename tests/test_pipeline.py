@@ -6,8 +6,6 @@ Each check targets a safety or geometry invariant using invented data.
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pii_mask_lito.detect import DateDetector, Detector
@@ -126,7 +124,7 @@ def test_merge_spans_collapses_overlaps():
     spans = [
         Span("US_SSN", 10, 21, 0.85, "000-00-0000"),
         Span("PHONE_NUMBER", 10, 21, 0.40, "000-00-0000"),
-        Span("EMAIL_ADDRESS", 30, 44, 0.99, "a@example.test"),
+        Span("EMAIL_ADDRESS", 30, 50, 0.99, "a@b.com"),
     ]
     kept = merge_spans(spans)
     assert len(kept) == 2
@@ -212,48 +210,6 @@ def test_gate2_ignores_table_artefacts():
     assert leaked == ["000-00-0000"]
 
 
-def test_gate2_phone_shape_does_not_cross_distant_columns():
-    from pii_mask_lito.pipeline import _verify_patterns
-
-    tokens = [
-        Token("12", 0, (0.05, 0.20, 0.08, 0.22), 0),
-        Token("345678", 0, (0.70, 0.20, 0.78, 0.22), 0),
-    ]
-    assert _verify_patterns("12 345678")[0] == ["12 345678"]
-    assert _verify_patterns(TokenText(tokens))[0] == []
-
-    tokens[1].bbox = (0.081, 0.20, 0.16, 0.22)
-    assert _verify_patterns(TokenText(tokens))[0] == ["12 345678"]
-
-
-def test_verify_uses_geometry_preserved_by_readback(tmp_path, monkeypatch):
-    from pii_mask_lito import pipeline
-
-    output = tmp_path / "output.txt"
-    output.write_text("placeholder")
-    tokens = [
-        Token("12", 0, (0.05, 0.20, 0.08, 0.22), 0),
-        Token("345678", 0, (0.70, 0.20, 0.78, 0.22), 0),
-    ]
-    monkeypatch.setattr(
-        pipeline,
-        "_readback_data",
-        lambda _path, _engine, _symbol_leaks=None: (
-            "12 345678", [TokenText(tokens)]
-        ),
-    )
-    report = Report(source="source.txt", output=str(output), engine="test")
-    assert _verify(str(output), report) == ([], [], [])
-
-
-def test_gate2_retry_keeps_phone_entity_instead_of_guessing_date():
-    from pii_mask_lito.pipeline import _pattern_entity
-
-    assert _pattern_entity("+1-202-555-0199") == "PHONE_NUMBER"
-    assert _pattern_entity("10/03/2026") == "DATE"
-    assert _pattern_entity("000-00-0000") == "US_SSN"
-
-
 def test_barcode_payload_is_masked_and_stops_decoding():
     """C1. Rasterization preserves a symbol perfectly, and masking covered only
 
@@ -296,29 +252,6 @@ def test_barcode_payload_is_masked_and_stops_decoding():
     ], "output still decodes"
 
 
-def test_verify_reuses_ocr_render_for_barcode_gate(tmp_path, monkeypatch):
-    from pii_mask_lito import pipeline
-
-    output = tmp_path / "output.pdf"
-    output.write_bytes(b"synthetic placeholder")
-
-    def readback(_path, _engine, symbol_leaks=None):
-        assert symbol_leaks is not None
-        symbol_leaks.append("decodable symbol on page 1")
-        return "", []
-
-    monkeypatch.setattr(pipeline.symbols, "available", lambda: True)
-    monkeypatch.setattr(pipeline, "_readback_data", readback)
-    monkeypatch.setattr(
-        pipeline, "_verify_symbols",
-        lambda _path: pytest.fail("output pages must not be rendered twice"),
-    )
-    report = Report(source="input.pdf", output=str(output), engine="test")
-    assert _verify(str(output), report, engine=object())[1] == [
-        "decodable symbol on page 1"
-    ]
-
-
 def test_signature_block_is_ink_without_words():
     """C5. Tesseract cannot read a signature, so it is invisible to detection,
 
@@ -343,27 +276,8 @@ def test_signature_block_is_ink_without_words():
     assert found[0][1] < 0.5, "the signature block, not the empty witness line"
 
 
-def test_typed_electronic_signature_text_is_not_a_signature_region():
-    from PIL import Image, ImageDraw
-
-    from pii_mask_lito import vision
-
-    if not vision.available():
-        return
-    image = Image.new("RGB", (800, 300), "white")
-    draw = ImageDraw.Draw(image)
-    for offset in range(0, 180, 3):
-        draw.line([(300 + offset, 70 + (offset % 30)), (310 + offset, 90)],
-                  fill="black", width=3)
-    tokens = [
-        Token("Electronically", 0, (0.10, 0.20, 0.23, 0.25), 0),
-        Token("signed", 0, (0.24, 0.20, 0.30, 0.25), 0),
-    ]
-    assert vision.signatures(image, tokens) == []
-
-
 def test_yunet_weights_ship_and_haar_still_covers_for_them():
-    """Visual-identifier coverage has no room for "we could not check".
+    """Safe Harbor #17 has no room for "we could not check".
 
     Both halves matter. The weights must actually be in the package -- a
     detector that silently fails to load reports every page face-free -- and the
@@ -395,36 +309,6 @@ def test_yunet_weights_ship_and_haar_still_covers_for_them():
         assert vision.faces(blank) == [], "the fallback must run, not raise"
     finally:
         vision._YUNET = original
-
-
-def test_yunet_detector_is_reused_and_resized_between_pages(monkeypatch):
-    from pii_mask_lito import vision
-
-    class FakeDetector:
-        sizes = []
-
-        def setInputSize(self, size):
-            self.sizes.append(size)
-
-    detector = FakeDetector()
-
-    class FakeFactory:
-        calls = []
-
-        @classmethod
-        def create(cls, path, _config, size, score):
-            cls.calls.append((path, size, score))
-            return detector
-
-    class FakeCV2:
-        FaceDetectorYN = FakeFactory
-
-    monkeypatch.setattr(vision, "_YUNET_CACHE", None)
-    first = vision._yunet_detector(FakeCV2, (800, 1000))
-    second = vision._yunet_detector(FakeCV2, (1200, 900))
-    assert first is second is detector
-    assert len(FakeFactory.calls) == 1
-    assert detector.sizes == [(1200, 900)]
 
 
 def test_unread_ink_finds_handwriting_and_ignores_a_ruled_table():
@@ -524,42 +408,6 @@ def test_bad_report_path_fails_before_any_work():
     shutil.rmtree(out, ignore_errors=True)
 
 
-def test_cli_confidence_score_is_bounded():
-    from pii_mask_lito.cli import build_parser
-
-    parser = build_parser()
-    args = parser.parse_args(["in.txt", "-o", "out.txt", "--min-score", "0.6"])
-    assert args.min_score == 0.6
-    with pytest.raises(SystemExit):
-        parser.parse_args(["in.txt", "-o", "out.txt", "--min-score", "1.1"])
-
-
-def test_cli_agent_modes_are_explicit(tmp_path, capsys):
-    from pii_mask_lito.cli import build_parser, main as cli_main
-
-    args = build_parser().parse_args(["input.pdf", "-o", "output.pdf", "--agents"])
-    assert args.agents == "qwen2.5vl:7b"
-
-    output = tmp_path / "masked.txt"
-    assert cli_main([
-        "samples/note.txt", "-o", str(output), "--mode", "hybrid"
-    ]) == 2
-    assert "requires --agents" in capsys.readouterr().err
-
-
-def test_cli_reports_missing_spacy_model_without_a_traceback(tmp_path, capsys):
-    from pii_mask_lito.cli import main as cli_main
-
-    out = tmp_path / "masked.txt"
-    code = cli_main([
-        "samples/note.txt", "-o", str(out),
-        "--spacy-model", "pii_mask_missing_test_model",
-    ])
-    captured = capsys.readouterr()
-    assert code == 1 and not out.exists()
-    assert "FAIL input 1: spaCy model" in captured.err
-
-
 def test_report_is_safe_by_default():
     """Paths, source values, and free-form review text may all contain PII."""
     import json
@@ -592,28 +440,6 @@ def test_report_is_safe_by_default():
     assert "/records/Jordan_Example_123456789.pdf" in unsafe
 
 
-def test_report_summary_contains_only_sanitized_aggregate_metadata():
-    import json
-
-    report = Report(source="secret.pdf", output="masked.pdf", engine="test")
-    report.findings = [
-        Finding("PERSON", "Mira Calder", "<NAME#0>", 0.8, "presidio",
-                0, (0.1, 0.1, 0.2, 0.2)),
-        Finding("internal customer label", "CUS-1234", "<ID#0>", 0.8,
-                "private-rule", 0, (0.2, 0.2, 0.4, 0.3)),
-    ]
-    summary = report.summary()
-    encoded = json.dumps(summary)
-    assert summary == [
-        {"entity": "CUSTOM", "source": "custom", "count": 1,
-         "normalized_box_area": 0.02},
-        {"entity": "PERSON", "source": "presidio", "count": 1,
-         "normalized_box_area": 0.01},
-    ]
-    assert "Mira" not in encoded and "CUS-1234" not in encoded
-    assert "internal customer label" not in encoded and "private-rule" not in encoded
-
-
 def test_report_trace_is_withheld_by_default():
     report = Report(source="input.pdf", output="output.pdf", engine="test")
     report.doc_type = "Record for Sensitive Person"
@@ -624,145 +450,14 @@ def test_report_trace_is_withheld_by_default():
     assert '"trace_count": 1' in safe
 
 
-def test_agent_audit_adds_review_without_exposing_it_in_safe_report(tmp_path):
-    from PIL import Image
-
-    from pii_mask_lito.agents import Trace
-    from pii_mask_lito.pipeline import _audit_output
-
-    path = tmp_path / "masked.png"
-    Image.new("RGB", (20, 20), "white").save(path)
-
-    class FakeAuditor:
-        def run(self, _image):
-            return ["Mira Calder"]
-
-    class FakeSemantic:
-        auditor = FakeAuditor()
-        trace = Trace()
-
-    report = Report(source="input.png", output=str(path), engine="test")
-    semantic = FakeSemantic()
-    _audit_output(str(path), semantic, report)
-
-    assert report.review == [
-        "agent audit page 1: possible remaining identifier: Mira Calder"
-    ]
-    assert semantic.trace.steps[0]["remaining"] == 1
-    assert "Mira Calder" not in report.to_json()
-
-
-def test_agent_audit_failure_requires_manual_review_but_does_not_crash(tmp_path):
-    from PIL import Image
-
-    from pii_mask_lito.agents import Trace
-    from pii_mask_lito.pipeline import _audit_output
-
-    path = tmp_path / "masked.png"
-    Image.new("RGB", (20, 20), "white").save(path)
-
-    class FailingAuditor:
-        def run(self, _image):
-            raise RuntimeError("model unavailable")
-
-    class FakeSemantic:
-        auditor = FailingAuditor()
-        trace = Trace()
-
-    report = Report(source="input.png", output=str(path), engine="test")
-    semantic = FakeSemantic()
-    _audit_output(str(path), semantic, report)
-
-    assert report.review == ["agent audit page 1 failed; manual review required"]
-    assert semantic.trace.steps[0]["failed"] == "RuntimeError"
-
-
-def test_semantic_page_failure_is_an_explicit_review_warning(tmp_path):
-    from pii_mask_lito.agents import Trace
-    from pii_mask_lito.pipeline import mask as mask_file
-    from pii_mask_lito.registry import TagRegistry
-
-    source = tmp_path / "plain.txt"
-    output = tmp_path / "masked.txt"
-    source.write_text("ordinary text", encoding="utf-8")
-
-    class NoopDetector:
-        def detect(self, _tt, hint=""):
-            return []
-
-    class FakeSemantic:
-        auditor = None
-
-        def begin_document(self):
-            self.trace = Trace()
-            self.trace.add("semantic_page", 0.0, {
-                "page": 1,
-                "failed": "TimeoutError",
-                "fallback": "rules-only",
-            })
-
-    report = mask_file(
-        str(source), str(output), detector=NoopDetector(),
-        registry=TagRegistry(), verify=False, vlm=FakeSemantic(),
-    )
-    assert report.review == [
-        "semantic assistance failed on 1 page(s); those pages used rules-only fallback"
-    ]
-    assert report.trace[0]["fallback"] == "rules-only"
-
-
-def test_gate2_rebuild_resets_semantic_pass_and_locks_new_values(
-        tmp_path, monkeypatch):
-    import pii_mask_lito.pipeline as pipeline_module
-    from pii_mask_lito.agents import Trace
-    from pii_mask_lito.pipeline import mask as mask_file
-
-    source = tmp_path / "input.pdf"
-    output = tmp_path / "output.pdf"
-    source.write_bytes(b"synthetic placeholder")
-
-    class FakeDetector:
-        lexicon = {}
-        suppressed = []
-
-    class FakeSemantic:
-        auditor = None
-        trace = Trace()
-        began = 0
-        restarted = 0
-        locked = []
-
-        def begin_document(self):
-            self.began += 1
-
-        def begin_pass(self):
-            self.restarted += 1
-
-        def lock_values(self, values):
-            self.locked.extend(values)
-
-    verification = iter([
-        ([], ["123456789"], []),
-        ([], [], []),
-    ])
-    monkeypatch.setattr(pipeline_module, "_ocr_or_none", lambda *_args: object())
-    monkeypatch.setattr(pipeline_module, "_loop_engine", lambda *args: args[0])
-    monkeypatch.setattr(pipeline_module, "_mask_pdf", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline_module, "_verify", lambda *_args: next(verification))
-
-    semantic = FakeSemantic()
-    report = mask_file(
-        str(source), str(output), detector=FakeDetector(), verify=True,
-        vlm=semantic,
-    )
-    assert report.verified
-    assert semantic.began == 1
-    assert semantic.restarted == 1
-    assert semantic.locked == ["123456789"]
-
-
 def test_a_small_image_panel_is_still_read():
-    """Every raster panel is eligible for OCR, regardless of page coverage."""
+    """H1. The old rule OCR'd a page only when raster images covered 10% of it.
+
+    A small insurance-card or ID panel on a text-rich page tripped nothing, and
+    every identifier printed inside it went unread while the run reported
+    success -- the same root cause as the worst bug in this project's history,
+    a heuristic deciding whether to look.
+    """
     from PIL import Image, ImageDraw
     from reportlab.lib.utils import ImageReader
     from reportlab.pdfgen import canvas
@@ -775,8 +470,9 @@ def test_a_small_image_panel_is_still_read():
         return
     from pii_mask_lito.images import _font
 
-    # Sized so the panel's pixels land roughly 1:1 at the default 300 DPI and
-    # its text remains small but readable.
+    # Sized so the panel's pixels land roughly 1:1 at the default 300 DPI, which
+    # makes its text about 10pt on the page -- an insurance-card thumbnail, not
+    # a decorative logo.
     panel = Image.new("RGB", (700, 130), "white")
     ImageDraw.Draw(panel).text((12, 30), "SSN 000-00-0000", fill="black", font=_font(64))
     src, dest = "/tmp/piimask_panel.pdf", "/tmp/piimask_panel_masked.pdf"
@@ -784,7 +480,7 @@ def test_a_small_image_panel_is_still_read():
     page.setFont("Helvetica", 10)
     for row in range(60):  # text-rich, so the panel is a small fraction of it
         page.drawString(50, 740 - 11 * row, "Statement of account activity for the period. " * 2)
-    # 168 x 31pt is under 1% of the page.
+    # 168 x 31pt is under 1% of the page: nowhere near the old 10% threshold.
     page.drawImage(ImageReader(panel), 60, 60, width=168, height=31)
     page.showPage()
     page.save()
@@ -805,32 +501,6 @@ def test_corpus_scores_above_its_floor():
         return
     results = score_corpus()
     assert mean_map_recall(results) >= 0.90, results
-
-
-def test_long_pdf_uses_disk_backed_page_storage(tmp_path, monkeypatch):
-    """Long inputs must not retain every source and masked RGB page in RAM."""
-    from reportlab.pdfgen import canvas
-
-    from pii_mask_lito import pdf as pdf_module
-    from pii_mask_lito.pipeline import _SPOOL_PAGE_THRESHOLD, mask as mask_file
-
-    src, dest = tmp_path / "long.pdf", tmp_path / "masked.pdf"
-    document = canvas.Canvas(str(src), pagesize=(180, 240))
-    for page in range(_SPOOL_PAGE_THRESHOLD):
-        document.drawString(12, 210, f"Synthetic long document page {page + 1}")
-        document.showPage()
-    document.save()
-
-    called = []
-    original = pdf_module.spool_page_images
-
-    def observed(*args, **kwargs):
-        called.append(True)
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(pdf_module, "spool_page_images", observed)
-    mask_file(str(src), str(dest), detector=Detector(entities=[]), verify=False)
-    assert called and pdf_module.page_count(str(dest)) == _SPOOL_PAGE_THRESHOLD
 
 
 def test_read_pages_keeps_the_real_page_number_on_a_subset():
@@ -865,24 +535,6 @@ def test_read_pages_keeps_the_real_page_number_on_a_subset():
         raise AssertionError("mismatched lengths should not be silently zipped")
     except ValueError:
         pass
-
-
-def test_recheck_starts_only_on_ocr_pages_whose_pixels_changed():
-    from pii_mask_lito.pipeline import _active_recheck_pages
-
-    provenance = [
-        {"full_ocr": True, "ocr_supplements": 0},
-        {"full_ocr": True, "ocr_supplements": 0},
-        {"full_ocr": False, "ocr_supplements": 2},
-        {"full_ocr": False, "ocr_supplements": 0},
-    ]
-    page_boxes = {
-        0: [],
-        1: [((0.1, 0.1, 0.2, 0.2), "<NAME#0>")],
-        2: [],
-        3: [((0.1, 0.1, 0.2, 0.2), "<NAME#1>")],
-    }
-    assert _active_recheck_pages(provenance, page_boxes) == {1}
 
 
 def main():

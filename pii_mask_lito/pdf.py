@@ -13,10 +13,6 @@ embedded original, because none of those survive at all.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator, MutableMapping
-from pathlib import Path
-
 import pypdfium2 as pdfium
 from pypdfium2 import raw as pdfium_c
 from PIL import Image
@@ -31,57 +27,6 @@ DEFAULT_DPI = 300
 # Below this many characters a "text layer" is usually just a stray watermark
 # or a scanner's failed attempt, and OCR gives better coverage.
 MIN_CHARS_FOR_TEXT_LAYER = 20
-# Keep OCR batches small enough that a long 300-DPI document does not turn into
-# one full-document allocation. Four letter pages are roughly 100 MiB as RGB.
-OCR_BATCH_IMAGES = 4
-
-
-class DiskImageStore(MutableMapping[int, Image.Image]):
-    """A dict-like image collection whose pixel buffers live on disk.
-
-    Values are loaded as independent RGB images on access and saved as
-    low-compression PNGs on assignment. The store deliberately implements the
-    ordinary mapping interface used by the masking and PDF-writing code, so the
-    long-document path changes storage rather than detection behavior.
-    """
-
-    def __init__(self, root: str | Path):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._keys: set[int] = set()
-
-    def _path(self, key: int) -> Path:
-        return self.root / f"page-{key:06d}.png"
-
-    def __getitem__(self, key: int) -> Image.Image:
-        if key not in self._keys:
-            raise KeyError(key)
-        with Image.open(self._path(key)) as source:
-            image = source.convert("RGB")
-            image.load()
-        return image
-
-    def __setitem__(self, key: int, image: Image.Image) -> None:
-        path = self._path(key)
-        pending = path.with_suffix(".pending.png")
-        try:
-            image.save(pending, "PNG", compress_level=1)
-            os.replace(pending, path)
-        finally:
-            pending.unlink(missing_ok=True)
-        self._keys.add(key)
-
-    def __delitem__(self, key: int) -> None:
-        if key not in self._keys:
-            raise KeyError(key)
-        self._path(key).unlink(missing_ok=True)
-        self._keys.remove(key)
-
-    def __iter__(self) -> Iterator[int]:
-        return iter(sorted(self._keys))
-
-    def __len__(self) -> int:
-        return len(self._keys)
 
 
 def _words_from_text_layer(page, page_index: int) -> list[Token]:
@@ -213,36 +158,6 @@ def render_page(page, dpi: int = DEFAULT_DPI) -> Image.Image:
     return page.render(scale=dpi / 72).to_pil().convert("RGB")
 
 
-def page_count(src: str) -> int:
-    pdf = pdfium.PdfDocument(src)
-    try:
-        return len(pdf)
-    finally:
-        pdf.close()
-
-
-def iter_page_images(src: str, dpi: int = DEFAULT_DPI) -> Iterator[Image.Image]:
-    """Render pages one at a time, keeping at most the yielded page resident."""
-    pdf = pdfium.PdfDocument(src)
-    try:
-        for index in range(len(pdf)):
-            yield render_page(pdf[index], dpi)
-    finally:
-        pdf.close()
-
-
-def spool_page_images(src: str, root: str | Path,
-                      dpi: int = DEFAULT_DPI) -> DiskImageStore:
-    """Render a reusable document into a disk-backed image mapping."""
-    store = DiskImageStore(root)
-    for index, image in enumerate(iter_page_images(src, dpi)):
-        try:
-            store[index] = image
-        finally:
-            image.close()
-    return store
-
-
 def requires_ocr(path: str) -> bool:
     """Does any page have no usable text layer, making OCR mandatory?
 
@@ -251,9 +166,12 @@ def requires_ocr(path: str) -> bool:
     document can be masked at all with no OCR engine installed, which is the one
     case where a missing engine has to be fatal rather than a review flag.
 
-    Image coverage is deliberately not a deciding factor. A small embedded ID
-    panel on an otherwise text-rich page can still contain sensitive content,
-    so every raster region is eligible for OCR.
+    There used to be a second test here -- an image-coverage fraction, above
+    which a page was OCR'd as well as read. It was a heuristic deciding whether
+    to *look* at a page, and it had the same root cause as the worst bug in this
+    project's history: a small insurance-card panel occupying 6% of a text-rich
+    page tripped nothing, and every identifier printed inside it went unread.
+    Nothing decides that any more.
     """
     pdf = pdfium.PdfDocument(path)
     try:
@@ -318,46 +236,28 @@ def extract(path: str, ocr=None, dpi: int = DEFAULT_DPI, rendered=None,
         # accurate boxes. Small image panels are still read; they are cropped,
         # never ignored by an area threshold.
         jobs: list[tuple[int, tuple[float, float, float, float], Image.Image]] = []
-        found_per_page: list[list[Token]] = [[] for _ in layers]
         provenance = []
+        for page_index, (tokens, page_regions, image) in enumerate(
+            zip(layers, regions, images)
+        ):
+            full_ocr = not tokens
+            selected = [(0.0, 0.0, 1.0, 1.0)] if full_ocr else page_regions
+            provenance.append({
+                "full_ocr": full_ocr,
+                "image_regions": len(selected),
+                "ocr_supplements": 0,
+            })
+            for region in selected:
+                cropped, actual_region = _crop(image, region)
+                jobs.append((page_index, actual_region, cropped))
 
-        def flush_jobs() -> None:
-            nonlocal jobs
-            if not jobs:
-                return
-            current, jobs = jobs, []
-            try:
-                reads = read_pages(ocr, [job[2] for job in current])
-                for (page_index, region, _crop_image), found in zip(current, reads):
-                    found_per_page[page_index].extend(
-                        _map_crop_tokens(found, page_index, region)
-                    )
-            finally:
-                for _page_index, _region, crop_image in current:
-                    crop_image.close()
-
-        for page_index, (tokens, page_regions) in enumerate(zip(layers, regions)):
-            image = images[page_index]
-            try:
-                full_ocr = not tokens
-                selected = [(0.0, 0.0, 1.0, 1.0)] if full_ocr else page_regions
-                provenance.append({
-                    "full_ocr": full_ocr,
-                    "image_regions": len(selected),
-                    "ocr_supplements": 0,
-                })
-                for region in selected:
-                    cropped, actual_region = _crop(image, region)
-                    jobs.append((page_index, actual_region, cropped))
-                    if len(jobs) >= OCR_BATCH_IMAGES:
-                        flush_jobs()
-            finally:
-                # Disk-backed sequences return a fresh image on every access.
-                # Closing here releases it immediately; callers supplying an
-                # ordinary list retain ownership of their reusable images.
-                if isinstance(images, DiskImageStore):
-                    image.close()
-        flush_jobs()
+        found_per_page: list[list[Token]] = [[] for _ in layers]
+        if jobs:
+            reads = read_pages(ocr, [job[2] for job in jobs])
+            for (page_index, region, _image), found in zip(jobs, reads):
+                found_per_page[page_index].extend(
+                    _map_crop_tokens(found, page_index, region)
+                )
 
         pages = []
         for page_index, (tokens, found) in enumerate(zip(layers, found_per_page)):
@@ -391,7 +291,7 @@ def extract(path: str, ocr=None, dpi: int = DEFAULT_DPI, rendered=None,
 def write(
     src: str,
     dest: str,
-    masked_images: MutableMapping[int, Image.Image],
+    masked_images: dict[int, Image.Image],
     text_layers: dict[int, list[tuple[tuple[float, float, float, float], str]]],
     dpi: int = DEFAULT_DPI,
 ) -> None:
@@ -410,34 +310,33 @@ def write(
         for i in range(len(pdf)):
             page = pdf[i]
             w_pt, h_pt = page.get_size()
-            stored = i in masked_images
-            image = masked_images[i] if stored else render_page(page, dpi)
-            try:
-                out.setPageSize((w_pt, h_pt))
-                out.drawImage(ImageReader(image), 0, 0, width=w_pt, height=h_pt)
+            image = masked_images.get(i) or render_page(page, dpi)
+            out.setPageSize((w_pt, h_pt))
+            out.drawImage(ImageReader(image), 0, 0, width=w_pt, height=h_pt)
 
-                entries = text_layers.get(i) or []
-                if entries:
-                    text = out.beginText()
-                    text.setTextRenderMode(3)
-                    for (x0, y0, x1, y1), value in entries:
-                        size = max((y1 - y0) * h_pt, 1)
-                        text.setFont("Helvetica", size)
-                        # Back to PDF's y-up origin, sitting on the baseline.
-                        text.setTextOrigin(x0 * w_pt, (1 - y1) * h_pt)
-                        text.textOut(value)
-                    out.drawText(text)
-                out.showPage()
-            finally:
-                if not stored or isinstance(masked_images, DiskImageStore):
-                    image.close()
+            entries = text_layers.get(i) or []
+            if entries:
+                text = out.beginText()
+                text.setTextRenderMode(3)
+                for (x0, y0, x1, y1), value in entries:
+                    size = max((y1 - y0) * h_pt, 1)
+                    text.setFont("Helvetica", size)
+                    # Back to PDF's y-up origin, sitting on the baseline.
+                    text.setTextOrigin(x0 * w_pt, (1 - y1) * h_pt)
+                    text.textOut(value)
+                out.drawText(text)
+            out.showPage()
         out.save()
     finally:
         pdf.close()
 
 
 def page_images(src: str, dpi: int = DEFAULT_DPI) -> list[Image.Image]:
-    return list(iter_page_images(src, dpi))
+    pdf = pdfium.PdfDocument(src)
+    try:
+        return [render_page(pdf[i], dpi) for i in range(len(pdf))]
+    finally:
+        pdf.close()
 
 
 def text_of(src: str) -> str:

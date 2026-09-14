@@ -17,14 +17,8 @@ tests/corpus/generated/
 # Scratch output.
 tmp/
 masked/
-# Common one-off CLI destinations may contain source pixels or identifiers.
-/masked-*
-/masked_*
-/masked.*
-/*-masked.*
 
 # Local tool state
 .pytest_cache/
 .claude/
-*.ses
 .DS_Store

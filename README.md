@@ -37,17 +37,11 @@ Python 3.10 or later is required.
 
 ```bash
 pip install pii-mask-lito
-python -m spacy download en_core_web_lg
 
 # OCR for scans and standalone images
 pip install 'pii-mask-lito[tesseract]'
 # Install the native Tesseract program with your operating-system package manager.
 ```
-
-The spaCy model is an explicit installation step so the masking command never
-downloads model files or contacts a model registry while processing a document.
-For transformer NER, install `pii-mask-lito[accurate]`, install a compatible
-spaCy transformer pipeline separately, and select it with `--spacy-model`.
 
 For a container image with Tesseract and the spaCy model included:
 
@@ -65,9 +59,6 @@ pii-mask-lito input.pdf -o output.pdf
 # Process several files into a directory and write a value-redacted report
 pii-mask-lito one.pdf two.docx -o masked/ --report masking-report.json
 
-# Print shareable, value-free counts and mask area by detector source
-pii-mask-lito input.pdf -o output.pdf --summary
-
 # Use a chosen OCR engine for image-only input
 pii-mask-lito scan.png -o scan-masked.png --ocr tesseract
 
@@ -76,9 +67,6 @@ pii-mask-lito input.pdf -o output.pdf --profile hipaa-safe-harbor
 
 # Tune a policy for a known document class
 pii-mask-lito input.pdf -o output.pdf --mask-organizations --min-masked-age 0
-
-# Raise the NER confidence floor when false-positive names dominate
-pii-mask-lito input.pdf -o output.pdf --min-score 0.6
 ```
 
 Run `pii-mask-lito --help` for the full option list. The tool verifies rendered
@@ -112,75 +100,15 @@ masks. Native-text PDFs use their text geometry; scans and images use OCR. PDF
 pages that required OCR are rechecked after masking so that visible text is
 tested again from the rendered result.
 
-Long PDFs spool reusable page renders into a private temporary directory and
-process OCR in small batches. This bounds the memory used by page pixels; the
-OCR model still has a substantial fixed memory cost. Temporary renders contain
-source pixels, are removed when the command finishes, and should be created on
-an encrypted or otherwise access-controlled local volume for sensitive work.
-
 Text reports are safe by default: paths and detected values are redacted.
 `--report-values` deliberately includes original values for an audit workflow;
 treat such a report as sensitive source data and do not commit or share it.
-`--summary` prints only sanitized entity/source counts and aggregate normalized
-box area. It is intended for diagnosing over-masking without disclosing values,
-paths, page coordinates, or custom labels.
 
-For PDF and image inputs, the optional `--agents` mode can use a local or hosted
-vision-language model to make semantic masking decisions from the page image,
-OCR tokens, and numbered rule candidates. It never supplies rendering
-coordinates; matching and placement remain deterministic. A hosted model sends
-page images and OCR-derived content to the selected provider. Do not enable it
-until that data transfer is approved for your documents.
-
-Decision modes are explicit:
-
-- `rules-only` makes no model call and is the default without `--agents`.
-- `hybrid` is the default with `--agents`; explicit model `keep` decisions may
-  veto only unlabeled semantic-NER PERSON, LOCATION, and ORGANIZATION
-  candidates. Pattern, spatial-label, structural, date, barcode, and vision
-  detections remain mandatory. Hybrid focuses only on adjudicating candidates;
-  it does not add free-form fields.
-- `strict-union` preserves every rule mask and uses the model only to discover
-  additional fields.
-
-Model-discovered masks are constrained to the active profile or `--entities`
-set. Only explicit IDs from the numbered rule-candidate list can create hybrid
-keep regions; free-form discovered fields cannot suppress later detections.
-
-```bash
-# Install the recommended local model once
-ollama pull qwen2.5vl:7b
-
-# One local semantic request per page; soft false positives may be kept
-pii-mask-lito input.pdf -o output.pdf --agents qwen2.5vl:7b --mode hybrid
-
-# Maximum-recall union with no semantic veto
-pii-mask-lito input.pdf -o output.pdf --agents qwen2.5vl:7b --mode strict-union
-```
-
-If the model fails or returns malformed output, both agent-enabled modes fall
-back to the complete rule result for that page. The CLI reports how many
-semantic pages succeeded and adds a review warning whenever a page falls back,
-so a rules-only result cannot be mistaken for a successful hybrid run.
-
-If final verification discovers a new identifier shape and rebuilds a PDF, the
-pipeline reuses the first pass's semantic decisions instead of calling the
-model again. Physical page numbering restarts at one, and the newly verified
-value is locked so a semantic keep decision cannot override the safety retry.
-
-The local Ollama transport disables model thinking and requests only a compact
-list of candidate IDs to keep. A server-enforced JSON schema caps newly
-discovered fields at eight per page and prevents unbounded or malformed local
-responses. Dense pages are packed to a fixed prompt budget; rule candidates
-that cannot be presented remain masked. Per-page traces include value-free
-model load, prompt, and output
-timings when Ollama provides them. Model and hardware choice
-still dominate runtime; benchmark a representative synthetic workload before
-using an agent mode for long documents. The 7B model is the local default;
-smaller models can be faster but must not be assumed to preserve masking recall.
-
-`--audit` adds a separate semantic pass over finished page pixels; its findings
-are review flags rather than automatic masks or verification failures.
+The optional `--agents` mode can use a local or hosted vision-language model to
+suggest additional document context. It never supplies rendering coordinates;
+matching and placement remain deterministic. A hosted model sends page images
+and OCR-derived content to the selected provider. Do not enable it until that
+data transfer is approved for your documents.
 
 ## Verification and review
 
@@ -221,24 +149,6 @@ The runner reports whether known synthetic values remain OCR-readable after
 masking and a coarse over-masking signal. Results vary with OCR engine,
 hardware, source quality, and selected profile; do not treat one run as a
 general accuracy claim.
-
-For an independently authored, cross-domain text check, the repository also
-supports Microsoft Presidio Research's MIT-licensed synthetic corpus:
-
-```bash
-git clone https://github.com/microsoft/presidio-research.git /tmp/presidio-research
-git -C /tmp/presidio-research checkout f1deaaf3dfaf69f9a803d9ae72b185c752fa217d
-python -m tests.benchmark.presidio_synth \
-  /tmp/presidio-research/data/synth_dataset_v2.json --limit 200
-```
-
-The adapter does not download or redistribute the dataset. It reports masking
-coverage only for entity families this project supports and states the omitted
-external labels explicitly.
-
-The pinned dataset file has SHA-256
-`ec08a771ba8135314cafb60752b2295212222ba3a4cd75d73811839c699e0012`;
-the runner prints the hash it actually evaluated.
 
 ## Contributing and security
 

@@ -10,15 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-keywords = ["pii", "privacy", "redaction", "de-identification", "ocr"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
 
@@ -36,11 +31,6 @@ dependencies = [
     "openpyxl>=3.1",        # MIT
 ]
 
-[project.urls]
-Homepage = "https://github.com/GaTheLy/pii-mask-lito"
-Repository = "https://github.com/GaTheLy/pii-mask-lito"
-Issues = "https://github.com/GaTheLy/pii-mask-lito/issues"
-
 [project.optional-dependencies]
 # Test runner. The suite is plain asserts, so pytest is the only thing needed;
 # checks that want an optional extra or the generated corpus skip themselves.
@@ -48,9 +38,7 @@ dev = ["pytest>=8.0"]
 paddle = ["paddleocr>=2.7", "paddlepaddle>=2.6", "numpy"]
 tesseract = ["pytesseract>=0.3.10"]
 rapidocr = ["rapidocr-onnxruntime"]
-# Runtime support for transformer-based spaCy pipelines. Model weights are
-# installed separately so package installation never performs a hidden download.
-accurate = ["spacy-transformers>=1.3"]
+accurate = ["spacy-transformers>=1.3"]   # enables en_core_web_trf
 # A barcode survives rasterization intact and carries the account number in a
 # form no detector reads. zxing-cpp is Apache-2.0; pyzbar wraps LGPL zbar and is
 # excluded by the same policy that rules out PyMuPDF.

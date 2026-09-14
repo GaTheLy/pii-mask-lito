@@ -7,21 +7,11 @@ import re
 import sys
 from pathlib import Path
 
-from .detect import Detector, DetectorConfigurationError
+from .detect import Detector
 from .model import TokenText, merge_spans
 from .pipeline import MaskingError, mask
 from .policy import PROFILES
 from .registry import TagRegistry
-
-
-def _probability(value: str) -> float:
-    try:
-        number = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a number from 0 to 1") from exc
-    if not 0 <= number <= 1:
-        raise argparse.ArgumentTypeError("must be between 0 and 1")
-    return number
 
 
 def _safe_name(name: str, detector: Detector, registry: TagRegistry) -> str:
@@ -87,26 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dpi", type=int, default=300,
         help="raster DPI for OCR and PDF output (below 300 costs OCR accuracy)")
-    parser.add_argument(
-        "--spacy-model",
-        default="en_core_web_lg",
-        help="installed spaCy model package or local model path used for NER "
-             "(default: en_core_web_lg)",
-    )
-    parser.add_argument(
-        "--min-score",
-        type=_probability,
-        default=0.4,
-        help="minimum Presidio/NER confidence from 0 to 1 (default: 0.4; "
-             "higher favors precision, lower favors recall)",
-    )
+    parser.add_argument("--spacy-model", default="en_core_web_lg")
     parser.add_argument("--report", help="write the masking report here (JSON)")
-    parser.add_argument(
-        "--summary",
-        action="store_true",
-        help="print value-free finding counts and normalized mask area grouped "
-             "by entity and detector source",
-    )
     parser.add_argument(
         "--report-values",
         action="store_true",
@@ -123,25 +95,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agents",
         nargs="?",
-        const="qwen2.5vl:7b",
+        const="gemma4:31b",
         metavar="MODEL",
-        help="use one VLM semantic decision pass per PDF/image page, then "
-             "ground all masks deterministically. MODEL picks the host as well "
-             "as the model -- an "
+        help="read the document with a VLM agent pipeline alongside the rules: "
+             "classify, read fields and owners, adjudicate, then ground "
+             "deterministically. MODEL picks the host as well as the model -- an "
              "Ollama tag stays local (gemma4:31b, qwen2.5vl:7b), while "
              "'gemini-3.8-flash', 'openrouter:MODEL', 'vllm:MODEL' or "
              "'openai-compatible:MODEL@https://host/v1' run it remotely. Hosted "
              "providers read the key from GEMINI_API_KEY / OPENAI_API_KEY / "
              "OPENROUTER_API_KEY and send page images off the machine; approve "
              "the provider and transfer before using sensitive documents.",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["rules-only", "hybrid", "strict-union"],
-        default=None,
-        help="masking decision mode: rules-only makes no model call; hybrid "
-             "lets the model keep soft candidates; strict-union lets the model "
-             "add masks only. Default: hybrid with --agents, otherwise rules-only",
     )
     parser.add_argument(
         "--audit",
@@ -230,13 +194,6 @@ def _unwritable(args, out: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    mode = args.mode or ("hybrid" if args.agents else "rules-only")
-    if mode != "rules-only" and not args.agents:
-        print(f"error: --mode {mode} requires --agents [MODEL]", file=sys.stderr)
-        return 2
-    if mode == "rules-only" and args.audit:
-        print("error: --audit requires an agent-enabled mode", file=sys.stderr)
-        return 2
     out = Path(args.out)
     if len(args.src) > 1 and not out.is_dir():
         print("error: --out must be a directory for multiple inputs", file=sys.stderr)
@@ -252,7 +209,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     detector = Detector(entities=args.entities, spacy_model=args.spacy_model,
-                        min_score=args.min_score,
                         mask_providers=args.mask_providers,
                         mask_organizations=args.mask_organizations,
                         min_masked_age=args.min_masked_age,
@@ -261,12 +217,11 @@ def main(argv: list[str] | None = None) -> int:
     # a PDF and its companion spreadsheet.
     registry = TagRegistry(short=not args.long_tags)
     reviewer = None
-    if args.agents and mode != "rules-only":
+    if args.agents:
         from . import agents
 
         reviewer = agents.build(
-            detector, model_name=args.agents, host=args.ollama_host,
-            audit=args.audit, mode=mode,
+            detector, model_name=args.agents, host=args.ollama_host, audit=args.audit
         )
 
     reports, failed = [], 0
@@ -292,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                 loop_ocr=args.loop_ocr,
                 mask_unread_ink=args.mask_unread_ink,
             )
-        except (MaskingError, DetectorConfigurationError) as exc:
+        except MaskingError as exc:
             print(f"FAIL input {position + 1}: {exc}", file=sys.stderr)
             failed += 1
             continue
@@ -311,25 +266,6 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"       review: {len(report.review)} item(s) require attention; "
                 "details are omitted from ordinary logs"
-            )
-        if args.summary:
-            print(f"       summary for input {position + 1}:")
-            for row in report.summary():
-                print(
-                    f"         {row['entity']:<24} {row['source']:<12} "
-                    f"count={row['count']:<5} "
-                    f"normalized_box_area={row['normalized_box_area']:.6f}"
-                )
-        semantic_steps = [
-            step for step in report.trace if step.get("agent") == "semantic_page"
-        ]
-        if semantic_steps:
-            succeeded = sum(not step.get("failed") for step in semantic_steps)
-            fallback = len(semantic_steps) - succeeded
-            note = f", rules-only fallback on {fallback}" if fallback else ""
-            print(
-                f"       semantic: {succeeded}/{len(semantic_steps)} page(s) "
-                f"succeeded{note}"
             )
         for step in report.trace:
             detail = ", ".join(f"{k}={v}" for k, v in step.items() if k not in ("agent", "seconds"))
